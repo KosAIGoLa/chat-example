@@ -1,0 +1,85 @@
+services:
+  nats:
+    image: nats:2.14.3-alpine
+    # JetStream (NATS Streaming 的官方替代): -js 开启, -sd 持久化目录, -m 监控端口
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+    ports:
+      - "4222:4222"   # client
+      - "8222:8222"   # monitoring (/jsz, /healthz, /varz)
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: chat
+      POSTGRES_PASSWORD: chatpass
+      POSTGRES_DB: chatdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chat -d chatdb"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # Go WebSocket chat backend (see ./chat-service)
+  ws-server:
+    build:
+      context: ./chat-service
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - SERVER_ADDR=:8080
+      - NATS_URL=nats://nats:4222
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=chat
+      - DB_PASSWORD=chatpass
+      - DB_NAME=chatdb
+      - JWT_SECRET="jwt_token"
+      - MSG_CRYPTO_KEY="msg_token"
+      - MEDIA_DIR=/app/data/voice
+    volumes:
+      - voice-data:/app/data/voice
+    depends_on:
+      nats:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # SvelteKit static frontend + nginx reverse proxy
+  # UI: http://localhost:3000
+  # Proxies /api/* and /ws → ws-server
+  frontend:
+    build:
+      context: ./front-chat
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - ws-server
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  nats-data:
+  voice-data:
