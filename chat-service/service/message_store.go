@@ -14,13 +14,21 @@ import (
 // RecallWindow is how long a sender may recall a message after send.
 const RecallWindow = 2 * time.Minute
 
-// MessageStore persists message metadata for recall authorization.
+// MessageStore persists message metadata for recall authorization + seq allocation.
 type MessageStore struct {
 	db *gorm.DB
 }
 
 func NewMessageStore(db *gorm.DB) *MessageStore {
 	return &MessageStore{db: db}
+}
+
+// EnsureSeqSequence creates the Postgres sequence used by NextSeq (idempotent).
+func EnsureSeqSequence(db *gorm.DB) error {
+	if db == nil {
+		return nil
+	}
+	return db.Exec(`CREATE SEQUENCE IF NOT EXISTS message_global_seq START WITH 1 INCREMENT BY 1`).Error
 }
 
 // NewMessageID returns a random 32-char hex id.
@@ -30,10 +38,27 @@ func NewMessageID() string {
 	return hex.EncodeToString(b)
 }
 
+// NextSeq returns the next global monotonic sequence number.
+func (s *MessageStore) NextSeq() int64 {
+	if s == nil || s.db == nil {
+		return time.Now().UnixNano()
+	}
+	var seq int64
+	if err := s.db.Raw(`SELECT nextval('message_global_seq')`).Scan(&seq).Error; err != nil {
+		// Fallback: time-based unique-ish value (dev only if sequence missing).
+		return time.Now().UnixNano()
+	}
+	return seq
+}
+
 // Save records a newly sent private/group chat message.
+// Assigns Seq via NextSeq when rec.Seq == 0.
 func (s *MessageStore) Save(rec *model.MessageRecord) error {
 	if s == nil || s.db == nil || rec == nil || rec.ID == "" {
 		return nil
+	}
+	if rec.Seq == 0 {
+		rec.Seq = s.NextSeq()
 	}
 	return s.db.Create(rec).Error
 }
@@ -84,6 +109,22 @@ func (s *MessageStore) RecalledIDs(ids []string) (map[string]bool, error) {
 	}
 	for _, r := range rows {
 		out[r.ID] = true
+	}
+	return out, nil
+}
+
+// SeqByIDs returns id → seq for the given message ids (only rows with seq > 0).
+func (s *MessageStore) SeqByIDs(ids []string) (map[string]int64, error) {
+	out := make(map[string]int64)
+	if s == nil || s.db == nil || len(ids) == 0 {
+		return out, nil
+	}
+	var rows []model.MessageRecord
+	if err := s.db.Select("id", "seq").Where("id IN ? AND seq > 0", ids).Find(&rows).Error; err != nil {
+		return out, err
+	}
+	for _, r := range rows {
+		out[r.ID] = r.Seq
 	}
 	return out, nil
 }

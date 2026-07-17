@@ -3,7 +3,9 @@ import {
 	chatService,
 	friendService,
 	groupService,
-	mediaService
+	mediaService,
+	redPacketService,
+	type CreateRedPacketBody
 } from '$lib/api';
 import {
 	encryptContent,
@@ -30,8 +32,29 @@ import type {
 	PingMessage,
 	PongMessage,
 	PresenceEvent,
-	RecallEvent
+	RecallEvent,
+	RedPacketClaimedEvent,
+	OfflineSyncEvent,
+	TypingEvent,
+	TypingUser
 } from './types';
+import { messagePreview } from './utils';
+import { toastError, toastInfo } from '$lib/ui/notify.svelte';
+import {
+	activeConvKey,
+	clearTypingHint,
+	setTypingHint,
+	typingUI
+} from './typing-ui.svelte';
+import {
+	convKeyGroup,
+	convKeyPrivate,
+	loadConvCache,
+	maxSeqOf,
+	mergeById,
+	saveConvCache,
+	sortMessagesBySeq
+} from './message-cache';
 
 const JOINED_GROUPS_KEY = 'joined_groups';
 
@@ -57,6 +80,7 @@ function isChatContent(msg: ChatMessage): boolean {
 	// Recalled messages keep their slot in history with empty body.
 	if (msg.recalled) return true;
 	if (msg.content_type === 'voice') return !!msg.media_url;
+	if (msg.content_type === 'red_packet') return !!msg.red_packet_id || !!msg.content;
 	// System notices (join/leave) and normal text both need non-empty content.
 	return !!msg.content;
 }
@@ -122,6 +146,12 @@ export function createChatController(opts: {
 	onUnauthorized?: () => void;
 	/** LiveKit call signaling events from the chat WebSocket. */
 	onCallEvent?: (ev: CallEvent) => void;
+	/** Balance changed (red packet send/claim). */
+	onBalanceChange?: (balance: number) => void;
+	/** Red packet claimed by anyone (refresh cards). */
+	onRedPacketClaimed?: (ev: RedPacketClaimedEvent) => void;
+	/** Typing indicator label changed (e.g. "Alice 正在输入…"). */
+	onTypingHintChange?: (label: string) => void;
 }) {
 	let ws: WebSocket | null = null;
 	let messages = $state<ChatMessage[]>([]);
@@ -146,6 +176,16 @@ export function createChatController(opts: {
 	let userLabels = $state<Record<string, string>>({});
 	/** user_ids with unread private messages (blink in list). */
 	let unreadPeers = $state<Record<string, boolean>>({});
+	/** group_ids with unread group messages. */
+	let unreadGroups = $state<Record<string, boolean>>({});
+	/** Last message preview per conversation key: private:uid | group:gid */
+	let lastPreviews = $state<Record<string, { text: string; ts: number }>>({});
+	/** Virtual wallet balance (coins). */
+	let balance = $state(0);
+	/** Users currently typing in the active conversation (private peer or group). */
+	let typingUsers = $state<TypingUser[]>([]);
+	/** Preformatted hint for UI (kept in sync for reliable reactivity). */
+	let typingHint = $state('');
 	let connectionStatus = $state<ConnectionStatus>('disconnected');
 	let historyLoading = $state(false);
 	/** How many reconnect attempts since last successful open. */
@@ -176,6 +216,24 @@ export function createChatController(opts: {
 	let heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
 	/** Last successful pong time (ms); useful for debugging / RTT. */
 	let lastPongAt = 0;
+	/**
+	 * Outbound typing state machine:
+	 *   idle → (keystroke) → active (send start) → (idle timeout) → send stop → idle
+	 * Remote side:
+	 *   start → show + TTL; stop → clear immediately; TTL expire → clear
+	 */
+	let typingActive = false;
+	let lastTypingPingAt = 0;
+	let typingIdleTimer: ReturnType<typeof setTimeout> | null = null;
+	let typingPruneTimer: ReturnType<typeof setInterval> | null = null;
+	/** Last outbound session so idle-stop always uses the same peer/group (群主关键). */
+	let lastTypingSession: { mode: ChatMode; peer: string; group: string } | null = null;
+	/** How long a remote typing flag stays without refresh (ms). Hard stop even if stop lost. */
+	const TYPING_TTL_MS = 3000;
+	/** Re-send "start" at most this often while continuously typing. */
+	const TYPING_PING_MS = 1500;
+	/** After last keystroke, send "stop". */
+	const TYPING_IDLE_MS = 1500;
 
 	function withoutSelf(list: OnlineUser[]): OnlineUser[] {
 		return list.filter((u) => u.user_id && u.user_id !== myUserId);
@@ -210,6 +268,30 @@ export function createChatController(opts: {
 		return withoutSelf(out);
 	}
 
+	function conversationKey(msg: ChatMessage): string | null {
+		if (msg.type === 'private') {
+			const peer = msg.from === myUserId ? msg.to : msg.from;
+			return peer ? `private:${peer}` : null;
+		}
+		if (msg.type === 'group') {
+			const gid = msg.group_id || msg.to;
+			return gid ? `group:${gid}` : null;
+		}
+		return null;
+	}
+
+	function updatePreview(msg: ChatMessage) {
+		const key = conversationKey(msg);
+		if (!key) return;
+		const ts = msg.timestamp ?? 0;
+		const prev = lastPreviews[key];
+		if (prev && prev.ts > ts) return;
+		lastPreviews = {
+			...lastPreviews,
+			[key]: { text: messagePreview(msg), ts }
+		};
+	}
+
 	function markUnread(peerId: string) {
 		const id = String(peerId ?? '');
 		if (!id || id === myUserId) return;
@@ -231,6 +313,265 @@ export function createChatController(opts: {
 
 	function hasUnread(peerId: string): boolean {
 		return !!unreadPeers[String(peerId ?? '')];
+	}
+
+	function markGroupUnread(gid: string) {
+		const id = String(gid ?? '');
+		if (!id) return;
+		if (chatMode === 'group' && String(groupId) === id) return;
+		if (unreadGroups[id]) return;
+		unreadGroups = { ...unreadGroups, [id]: true };
+	}
+
+	function clearGroupUnread(gid: string) {
+		const id = String(gid ?? '');
+		if (!id || !unreadGroups[id]) return;
+		const next = { ...unreadGroups };
+		delete next[id];
+		unreadGroups = next;
+	}
+
+	function hasGroupUnread(gid: string): boolean {
+		return !!unreadGroups[String(gid ?? '')];
+	}
+
+	async function refreshBalance() {
+		try {
+			const w = await redPacketService.getWallet();
+			balance = w.balance ?? 0;
+			opts.onBalanceChange?.(balance);
+		} catch {
+			// ignore
+		}
+	}
+
+	function currentConvKey(): string {
+		return activeConvKey(chatMode, targetUser, groupId);
+	}
+
+	function formatTypingLabel(list: TypingUser[]): string {
+		if (list.length === 0) return '';
+		// Prefer list length heuristics over chatMode — safer if mode briefly desyncs.
+		const names = list.map((t) => t.username || t.user_id);
+		if (chatMode === 'private' || (names.length === 1 && !groupId)) {
+			return `${names[0] || '对方'} 正在输入…`;
+		}
+		if (names.length === 1) return `${names[0]} 正在输入…`;
+		if (names.length === 2) return `${names[0]}、${names[1]} 正在输入…`;
+		return `${names[0]} 等 ${names.length} 人正在输入…`;
+	}
+
+	function publishTypingHint(list: TypingUser[] = typingUsers) {
+		const label = list.length === 0 ? '' : formatTypingLabel(list);
+		typingHint = label;
+		if (label) {
+			setTypingHint(label, currentConvKey());
+		} else {
+			// Force clear — do not leave stale "群主正在输入"
+			clearTypingHint();
+		}
+		opts.onTypingHintChange?.(label);
+	}
+
+	function pruneTypingUsers() {
+		const now = Date.now();
+		const next = typingUsers.filter((t) => t.until > now);
+		if (next.length !== typingUsers.length) {
+			typingUsers = next;
+			publishTypingHint(next);
+		} else if (typingUsers.length === 0 && (typingHint || typingUI.hint)) {
+			// Heal stuck UI if list empty but hint remains
+			publishTypingHint([]);
+		}
+	}
+
+	function ensureTypingPrune() {
+		if (typingPruneTimer != null) return;
+		typingPruneTimer = setInterval(pruneTypingUsers, 400);
+	}
+
+	function removeRemoteTyper(userId: string) {
+		const id = String(userId ?? '');
+		if (!id) return;
+		const before = typingUsers.length;
+		const next = typingUsers.filter((t) => t.user_id !== id);
+		if (next.length !== before) {
+			typingUsers = next;
+			publishTypingHint(next);
+		}
+	}
+
+	function applyTypingEvent(ev: TypingEvent) {
+		const from = String(ev.from ?? '');
+		if (!from || from === myUserId) return;
+
+		const action = String(ev.content || 'start').toLowerCase();
+		const isStop = action === 'stop' || action === '0' || action === 'false';
+
+		// STOP: always drop this user if present (no conversation filter).
+		// Fixes stuck "群主正在输入" when stop arrives after a brief mode/group desync.
+		if (isStop) {
+			removeRemoteTyper(from);
+			return;
+		}
+
+		const evGroup = String(ev.group_id ?? '').trim();
+		const activeGroup = String(groupId ?? '').trim();
+		const activePeer = String(targetUser ?? '').trim();
+
+		// START: only show for the conversation currently open.
+		if (evGroup) {
+			if (chatMode !== 'group') return;
+			if (activeGroup && activeGroup !== evGroup) return;
+			if (!activeGroup && !joinedGroups.includes(evGroup)) return;
+			if (!activeGroup) groupId = evGroup;
+		} else {
+			if (chatMode !== 'private') return;
+			if (!activePeer || activePeer !== from) return;
+		}
+
+		const name = (ev.from_name || userLabels[from] || from).trim() || from;
+		const until = Date.now() + TYPING_TTL_MS;
+		const rest = typingUsers.filter((t) => t.user_id !== from);
+		const next = [...rest, { user_id: from, username: name, until }];
+		typingUsers = next;
+		publishTypingHint(next);
+		ensureTypingPrune();
+		if (name && from) {
+			rememberUsers([{ user_id: from, username: name }]);
+		}
+	}
+
+	function clearTypingForConversation() {
+		typingUsers = [];
+		typingHint = '';
+		clearTypingHint();
+		opts.onTypingHintChange?.('');
+	}
+
+	/** Human-readable line for UI. */
+	function typingLabel(): string {
+		pruneTypingUsers();
+		return typingHint || formatTypingLabel(typingUsers) || typingUI.hint;
+	}
+
+	function resolveTypingSession(session?: {
+		mode?: ChatMode;
+		peer?: string;
+		group?: string;
+	}): { mode: ChatMode; peer: string; group: string } | null {
+		let mode: ChatMode = session?.mode ?? chatMode;
+		const peer = (session?.peer ?? targetUser).trim();
+		const group = (session?.group ?? groupId).trim();
+
+		// Prefer group when both group mode and group id are present (群主/群员).
+		if ((session?.mode === 'group' || chatMode === 'group') && group) {
+			mode = 'group';
+		} else if (group && !peer) {
+			mode = 'group';
+		} else if (peer) {
+			mode = 'private';
+		}
+
+		if (mode === 'private' && !peer) return null;
+		if (mode === 'group' && !group) return null;
+		return { mode, peer, group };
+	}
+
+	/**
+	 * Notify peer/group that I am typing (throttled).
+	 * Call from input; pass UI session so 群主 groupId is never lost on idle-stop.
+	 */
+	function notifyTyping(session?: { mode?: ChatMode; peer?: string; group?: string }) {
+		const resolved = resolveTypingSession(session);
+		if (!resolved) return;
+		if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+		const { mode, peer, group } = resolved;
+		chatMode = mode;
+		if (peer) targetUser = peer;
+		if (group) groupId = group;
+
+		// Remember session for idle-stop (critical for group owner stop).
+		lastTypingSession = { mode, peer, group };
+		typingActive = true;
+
+		const now = Date.now();
+		const shouldPing = lastTypingPingAt === 0 || now - lastTypingPingAt >= TYPING_PING_MS;
+		if (shouldPing) {
+			lastTypingPingAt = now;
+			const payload =
+				mode === 'private'
+					? {
+							type: 'typing' as const,
+							from: myUserId,
+							to: peer,
+							content: 'start',
+							timestamp: Math.floor(now / 1000)
+						}
+					: {
+							type: 'typing' as const,
+							from: myUserId,
+							to: group,
+							group_id: group,
+							content: 'start',
+							timestamp: Math.floor(now / 1000)
+						};
+			void wsSendJSON(payload).catch((err) => {
+				console.warn('[typing] start failed', err);
+			});
+		}
+
+		// Reset idle → stop timer on every keystroke.
+		if (typingIdleTimer != null) clearTimeout(typingIdleTimer);
+		typingIdleTimer = setTimeout(() => {
+			typingIdleTimer = null;
+			// Use lastTypingSession snapshot, not live controller state.
+			notifyTypingStop(lastTypingSession ?? resolved);
+		}, TYPING_IDLE_MS);
+	}
+
+	function notifyTypingStop(session?: { mode?: ChatMode; peer?: string; group?: string } | null) {
+		if (typingIdleTimer != null) {
+			clearTimeout(typingIdleTimer);
+			typingIdleTimer = null;
+		}
+
+		// Only send stop if we previously advertised start.
+		if (!typingActive) {
+			lastTypingPingAt = 0;
+			return;
+		}
+		typingActive = false;
+		lastTypingPingAt = 0;
+
+		const resolved =
+			resolveTypingSession(session ?? lastTypingSession ?? undefined) ?? lastTypingSession;
+		lastTypingSession = null;
+		if (!resolved) return;
+		if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+		const { mode, peer, group } = resolved;
+		const payload =
+			mode === 'private'
+				? {
+						type: 'typing' as const,
+						from: myUserId,
+						to: peer,
+						content: 'stop',
+						timestamp: Math.floor(Date.now() / 1000)
+					}
+				: {
+						type: 'typing' as const,
+						from: myUserId,
+						to: group,
+						group_id: group,
+						content: 'stop',
+						timestamp: Math.floor(Date.now() / 1000)
+					};
+		void wsSendJSON(payload).catch((err) => {
+			console.warn('[typing] stop failed', err);
+		});
 	}
 
 	/** Ensure peer appears in private online list (e.g. DM from someone not yet listed). */
@@ -275,6 +616,11 @@ export function createChatController(opts: {
 
 	async function handleIncomingChat(msg: ChatMessage) {
 		const plain = await decryptMessage(msg);
+		updatePreview(plain);
+		// Any real chat message implies they stopped typing.
+		if (plain.from && plain.from !== myUserId) {
+			removeRemoteTyper(plain.from);
+		}
 
 		// Private DM from someone else while not viewing that chat → unread blink.
 		if (plain.type === 'private' && plain.from && plain.to === myUserId) {
@@ -291,6 +637,15 @@ export function createChatController(opts: {
 				markUnread(from);
 			}
 			return;
+		}
+
+		// Group message while not viewing that group.
+		if (plain.type === 'group' && plain.from !== myUserId) {
+			const gid = plain.group_id || plain.to;
+			if (gid && !(chatMode === 'group' && String(groupId) === String(gid))) {
+				markGroupUnread(String(gid));
+				return;
+			}
 		}
 
 		if (!belongsToConversation(plain, chatMode, myUserId, targetUser, groupId)) {
@@ -415,12 +770,69 @@ export function createChatController(opts: {
 	/** Send application JSON over WS, sealed with AES-GCM frame envelope. */
 	async function wsSendJSON(payload: unknown, socket: WebSocket = ws!): Promise<void> {
 		if (!socket || socket.readyState !== WebSocket.OPEN) {
-			throw new Error('Not connected');
+			throw new Error('网络未连接');
 		}
 		await ensureCryptoKey();
 		const plain = JSON.stringify(payload);
 		const wire = await sealWSFrame(plain);
 		socket.send(wire);
+	}
+
+	/** Wait until WS is OPEN or timeout (network flap). */
+	async function waitForOpenSocket(timeoutMs = 12_000): Promise<WebSocket> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			if (ws && ws.readyState === WebSocket.OPEN) return ws;
+			// Kick a reconnect if completely down.
+			if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+				if (!intentionalClose && connectionStatus !== 'connecting' && connectionStatus !== 'reconnecting') {
+					connect({ isReconnect: true });
+				}
+			}
+			await new Promise((r) => setTimeout(r, 250));
+		}
+		throw new Error('网络不稳定，连接超时');
+	}
+
+	/**
+	 * Send with wait-for-connect + exponential backoff retries.
+	 * Used for chat content that must not be lost on brief network blips.
+	 */
+	async function wsSendReliable(
+		payload: unknown,
+		optsSend: { attempts?: number; label?: string } = {}
+	): Promise<void> {
+		const attempts = optsSend.attempts ?? 4;
+		let lastErr: Error | null = null;
+		for (let i = 0; i < attempts; i++) {
+			try {
+				const socket = await waitForOpenSocket(i === 0 ? 8_000 : 12_000);
+				await wsSendJSON(payload, socket);
+				return;
+			} catch (e) {
+				lastErr = e as Error;
+				const backoff = Math.min(4000, 400 * Math.pow(2, i));
+				console.warn(
+					`[ws] send retry ${i + 1}/${attempts}`,
+					optsSend.label ?? '',
+					lastErr.message
+				);
+				if (i < attempts - 1) {
+					await new Promise((r) => setTimeout(r, backoff));
+				}
+			}
+		}
+		throw lastErr ?? new Error('发送失败');
+	}
+
+	function updateMessageStatus(
+		id: string,
+		status: NonNullable<ChatMessage['send_status']>,
+		patch?: Partial<ChatMessage>
+	) {
+		messages = messages.map((m) =>
+			m.id === id ? { ...m, send_status: status, ...patch } : m
+		);
 	}
 
 	/** After socket is open: presence, groups, history (crypto key already loaded). */
@@ -432,6 +844,7 @@ export function createChatController(opts: {
 		void refreshIncomingRequests();
 		void refreshBlacklist();
 		void refreshMyGroups();
+		void refreshBalance();
 
 		// Re-join groups so membership survives disconnect / refresh.
 		// content "rejoin" + REST rejoin=1 → no "加入到群" notice on every reconnect.
@@ -461,6 +874,8 @@ export function createChatController(opts: {
 		if (chatMode === 'group' && groupId.trim()) {
 			void refreshGroupMembers(groupId.trim());
 		}
+		// Auto-resend messages that failed during network flap.
+		void flushPendingSends();
 	}
 
 	function attachNetworkHooks() {
@@ -679,6 +1094,27 @@ export function createChatController(opts: {
 						applyGroupMembers(raw as GroupMembersEvent);
 						return;
 					}
+					// Offline inbox flushed after reconnect.
+					if ('type' in raw && raw.type === 'offline_sync') {
+						const oe = raw as OfflineSyncEvent;
+						console.info('[ws] offline sync', oe.count);
+						void refreshBalance();
+						return;
+					}
+					// Typing indicator (ephemeral).
+					if ('type' in raw && raw.type === 'typing') {
+						applyTypingEvent(raw as TypingEvent);
+						return;
+					}
+					// Red packet claimed by someone.
+					if ('type' in raw && raw.type === 'red_packet_claimed') {
+						const ev = raw as RedPacketClaimedEvent;
+						opts.onRedPacketClaimed?.(ev);
+						if (ev.user_id === myUserId) {
+							void refreshBalance();
+						}
+						return;
+					}
 					const msg = raw as ChatMessage;
 					if (msg.recalled && msg.id) {
 						applyRecall(msg.id);
@@ -776,12 +1212,65 @@ export function createChatController(opts: {
 		connect({ isReconnect: true });
 	}
 
+	function activeCacheKey(): string {
+		if (chatMode === 'private' && targetUser.trim()) return convKeyPrivate(targetUser.trim());
+		if (chatMode === 'group' && groupId.trim()) return convKeyGroup(groupId.trim());
+		return '';
+	}
+
+	function persistActiveCache(list: ChatMessage[] = messages) {
+		const key = activeCacheKey();
+		if (!key) return;
+		saveConvCache(key, list, maxSeqOf(list));
+	}
+
 	function appendMessage(msg: ChatMessage) {
+		// Same id: merge (server echo after optimistic send → mark sent).
+		if (msg.id) {
+			const idx = messages.findIndex((m) => m.id === msg.id);
+			if (idx >= 0) {
+				const prev = messages[idx];
+				const merged: ChatMessage = {
+					...prev,
+					...msg,
+					seq: msg.seq || prev.seq,
+					// Keep local plaintext & status for own bubbles unless echo confirms.
+					content:
+						prev.from === myUserId && prev._local_plain
+							? prev._local_plain
+							: msg.content || prev.content,
+					encrypted: prev.from === myUserId ? false : msg.encrypted,
+					_local_plain: prev._local_plain,
+					send_status:
+						prev.from === myUserId
+							? msg.send_status ??
+								(prev.send_status === 'sending' || prev.send_status === 'pending'
+									? 'sent'
+									: prev.send_status) ??
+								'sent'
+							: undefined
+				};
+				const next = [...messages];
+				next[idx] = merged;
+				messages = sortMessagesBySeq(next);
+				updatePreview(merged);
+				persistActiveCache(messages);
+				return;
+			}
+		}
 		const key = messageKey(msg);
 		if (messages.some((m) => messageKey(m) === key)) return;
-		// If same id already present (optimistic + server echo), skip.
-		if (msg.id && messages.some((m) => m.id === msg.id)) return;
-		messages = [...messages, msg];
+		messages = sortMessagesBySeq([...messages, msg]);
+		updatePreview(msg);
+		persistActiveCache(messages);
+	}
+
+	function mergeMessages(incoming: ChatMessage[]) {
+		if (!incoming.length) return;
+		const merged = mergeById(messages, incoming);
+		messages = merged;
+		for (const m of incoming) updatePreview(m);
+		persistActiveCache(merged);
 	}
 
 	function applyRecall(id: string) {
@@ -889,41 +1378,108 @@ export function createChatController(opts: {
 		}
 	}
 
+	/**
+	 * Load conversation history:
+	 *  1) Hydrate from local cache immediately (ordered by seq)
+	 *  2) Fetch only messages with seq > max_seq (or full window if no cache)
+	 *  3) Merge, sort, write cache
+	 */
 	async function loadPrivateHistory(peerId: string, force = false) {
-		const key = `private:${peerId}`;
+		const key = convKeyPrivate(peerId);
 		if (!force && loadedKey === key) return;
 		const epoch = ++historyEpoch;
+		const switching = loadedKey !== key;
 		loadedKey = key;
 		historyLoading = true;
-		messages = [];
+
+		// 1) Cache first paint
+		const cached = loadConvCache(key);
+		let base: ChatMessage[] = [];
+		if (cached?.messages?.length) {
+			base = sortMessagesBySeq([...cached.messages]);
+			if (switching || messages.length === 0) {
+				messages = base;
+				for (const m of base) updatePreview(m);
+			} else {
+				base = mergeById(messages, base);
+				messages = base;
+			}
+		} else if (switching) {
+			messages = [];
+		} else {
+			base = [...messages];
+		}
+
 		try {
 			await ensureCryptoKey().catch(() => undefined);
-			const res = await chatService.getPrivateHistory(peerId);
+			const sinceSeq = maxSeqOf(base);
+			// Full window when no seq yet; otherwise delta only after last seq.
+			const res = await chatService.getPrivateHistory(peerId, sinceSeq > 0 ? 100 : 100, {
+				sinceSeq: sinceSeq > 0 ? sinceSeq : undefined
+			});
 			if (epoch !== historyEpoch) return;
-			const list = (res.messages ?? []).filter(isChatContent);
-			messages = await decryptMessages(list);
+			const list = await decryptMessages((res.messages ?? []).filter(isChatContent));
+			if (list.length || sinceSeq === 0) {
+				const merged = mergeById(base, list);
+				messages = merged;
+				for (const m of list) updatePreview(m);
+				const maxSeq = Math.max(sinceSeq, res.max_seq ?? 0, maxSeqOf(merged));
+				saveConvCache(key, merged, maxSeq);
+			} else {
+				// Empty delta — still refresh cache max_seq
+				saveConvCache(key, base, Math.max(sinceSeq, res.max_seq ?? 0));
+			}
 		} catch {
-			if (epoch === historyEpoch) messages = [];
+			if (epoch === historyEpoch && !base.length) messages = [];
 		} finally {
 			if (epoch === historyEpoch) historyLoading = false;
 		}
 	}
 
 	async function loadGroupHistory(g: string, force = false) {
-		const key = `group:${g}`;
+		const key = convKeyGroup(g);
 		if (!force && loadedKey === key) return;
 		const epoch = ++historyEpoch;
+		const switching = loadedKey !== key;
 		loadedKey = key;
 		historyLoading = true;
-		messages = [];
+
+		const cached = loadConvCache(key);
+		let base: ChatMessage[] = [];
+		if (cached?.messages?.length) {
+			base = sortMessagesBySeq([...cached.messages]);
+			if (switching || messages.length === 0) {
+				messages = base;
+				for (const m of base) updatePreview(m);
+			} else {
+				base = mergeById(messages, base);
+				messages = base;
+			}
+		} else if (switching) {
+			messages = [];
+		} else {
+			base = [...messages];
+		}
+
 		try {
 			await ensureCryptoKey().catch(() => undefined);
-			const res = await chatService.getGroupHistory(g);
+			const sinceSeq = maxSeqOf(base);
+			const res = await chatService.getGroupHistory(g, 100, {
+				sinceSeq: sinceSeq > 0 ? sinceSeq : undefined
+			});
 			if (epoch !== historyEpoch) return;
-			const list = (res.messages ?? []).filter(isChatContent);
-			messages = await decryptMessages(list);
+			const list = await decryptMessages((res.messages ?? []).filter(isChatContent));
+			if (list.length || sinceSeq === 0) {
+				const merged = mergeById(base, list);
+				messages = merged;
+				for (const m of list) updatePreview(m);
+				const maxSeq = Math.max(sinceSeq, res.max_seq ?? 0, maxSeqOf(merged));
+				saveConvCache(key, merged, maxSeq);
+			} else {
+				saveConvCache(key, base, Math.max(sinceSeq, res.max_seq ?? 0));
+			}
 		} catch {
-			if (epoch === historyEpoch) messages = [];
+			if (epoch === historyEpoch && !base.length) messages = [];
 		} finally {
 			if (epoch === historyEpoch) historyLoading = false;
 		}
@@ -973,105 +1529,233 @@ export function createChatController(opts: {
 	}
 
 	async function sendMessage() {
-		if (!inputText.trim() || !ws || ws.readyState !== WebSocket.OPEN) return;
+		if (!inputText.trim()) return;
 
 		const dest = conversationTarget();
-		if (!dest) return;
+		if (!dest) {
+			toastInfo(chatMode === 'private' ? '请先选择好友' : '请先选择群聊');
+			return;
+		}
 
 		const plain = inputText.trim();
+		const id = newMsgId();
+		const ts = Math.floor(Date.now() / 1000);
+
+		// Optimistic bubble immediately — shows "发送中…" while network recovers.
+		const local: ChatMessage = {
+			id,
+			type: chatMode,
+			from: myUserId,
+			to: chatMode === 'private' ? dest.peer : dest.g,
+			content: plain,
+			encrypted: false,
+			content_type: 'text',
+			group_id: chatMode === 'group' ? dest.g : '',
+			timestamp: ts,
+			send_status: 'sending',
+			_local_plain: plain
+		};
+		appendMessage(local);
+		inputText = '';
+		// Sending a message ends our typing state.
+		notifyTypingStop();
+
+		void deliverChatMessage(local);
+	}
+
+	/** Encrypt + reliable WS send; updates bubble status. */
+	async function deliverChatMessage(local: ChatMessage) {
+		if (!local.id) return;
+		updateMessageStatus(local.id, 'sending');
+
 		try {
 			await ensureCryptoKey();
 		} catch (err) {
 			console.error('[crypto] key load failed', err);
-			alert('Encryption key not available — cannot send');
+			updateMessageStatus(local.id, 'failed');
+			toastError('加密密钥不可用，无法发送');
 			return;
 		}
 
+		const plain = local._local_plain ?? local.content;
 		let cipher = plain;
 		try {
-			cipher = await encryptContent(plain);
+			// Voice / red_packet: content may already be label; re-encrypt plaintext label.
+			if (local.content_type === 'voice') {
+				cipher = await encryptContent(plain || '🎤 Voice message');
+			} else if (local.content_type === 'red_packet') {
+				// Red packets are published by REST — not re-sent here.
+				updateMessageStatus(local.id, 'sent');
+				return;
+			} else {
+				cipher = await encryptContent(plain);
+			}
 		} catch (err) {
 			console.error('[crypto] encrypt failed', err);
-			alert('Failed to encrypt message');
+			updateMessageStatus(local.id, 'failed');
+			toastError('消息加密失败');
 			return;
 		}
 
 		const wire: ChatMessage = {
-			id: newMsgId(),
-			type: chatMode,
-			from: myUserId,
-			to: chatMode === 'private' ? dest.peer : dest.g,
+			id: local.id,
+			type: local.type,
+			from: local.from,
+			to: local.to,
 			content: cipher,
 			encrypted: true,
-			content_type: 'text',
-			group_id: chatMode === 'group' ? dest.g : '',
-			timestamp: Math.floor(Date.now() / 1000)
+			content_type: local.content_type ?? 'text',
+			media_url: local.media_url,
+			duration: local.duration,
+			group_id: local.group_id ?? '',
+			timestamp: local.timestamp ?? Math.floor(Date.now() / 1000),
+			red_packet_id: local.red_packet_id
 		};
 
 		try {
-			await wsSendJSON(wire);
+			await wsSendReliable(wire, { attempts: 4, label: local.id });
+			updateMessageStatus(local.id, 'sent');
 		} catch (err) {
-			alert((err as Error).message || 'Send failed');
-			return;
+			console.error('[ws] deliver failed', err);
+			updateMessageStatus(local.id, 'failed');
+			toastError((err as Error).message || '发送失败，可点击重试');
 		}
-		// Optimistic local echo with plaintext for the sender UI.
-		appendMessage({ ...wire, content: plain, encrypted: false });
-		inputText = '';
+	}
+
+	/** Manual / auto resend of a failed outbound message. */
+	async function resendMessage(msg: ChatMessage) {
+		if (!msg.id || msg.from !== myUserId) return;
+		if (msg.send_status !== 'failed' && msg.send_status !== 'pending') return;
+		const local: ChatMessage = {
+			...msg,
+			send_status: 'sending',
+			_local_plain: msg._local_plain ?? msg.content
+		};
+		// Keep bubble content as plaintext for UI.
+		messages = messages.map((m) =>
+			m.id === msg.id
+				? {
+						...m,
+						send_status: 'sending',
+						content: local._local_plain ?? m.content,
+						encrypted: false
+					}
+				: m
+		);
+		toastInfo('正在重新发送…');
+		await deliverChatMessage(local);
+	}
+
+	/** Flush any failed/pending own messages after reconnect. */
+	async function flushPendingSends() {
+		const pending = messages.filter(
+			(m) =>
+				m.from === myUserId &&
+				m.id &&
+				(m.send_status === 'failed' || m.send_status === 'pending')
+		);
+		for (const m of pending) {
+			await resendMessage(m);
+		}
 	}
 
 	/** Recall own message within the server window (2 minutes). */
 	async function recallMessage(msg: ChatMessage) {
-		if (!msg.id || !ws || ws.readyState !== WebSocket.OPEN) return;
+		if (!msg.id) return;
 		if (msg.from !== myUserId || msg.recalled) return;
+		if (msg.send_status === 'sending' || msg.send_status === 'failed') {
+			toastInfo('消息尚未送达，无法撤回');
+			return;
+		}
 		try {
-			await wsSendJSON({
-				type: 'recall',
-				id: msg.id,
-				from: myUserId,
-				to: msg.to,
-				content: '',
-				group_id: msg.group_id ?? ''
-			} satisfies ChatMessage);
+			await wsSendReliable(
+				{
+					type: 'recall',
+					id: msg.id,
+					from: myUserId,
+					to: msg.to,
+					content: '',
+					group_id: msg.group_id ?? ''
+				} satisfies ChatMessage,
+				{ attempts: 3, label: `recall:${msg.id}` }
+			);
 			// Optimistic mark; server broadcast confirms for peers.
 			applyRecall(msg.id);
 		} catch (err) {
-			alert((err as Error).message || 'Recall failed');
+			toastError((err as Error).message || '撤回失败');
 		}
 	}
 
 	/** Upload recorded audio and send as a voice chat message. */
-	async function sendVoiceMessage(blob: Blob, durationSec: number) {
-		if (!ws || ws.readyState !== WebSocket.OPEN) {
-			throw new Error('Not connected');
+	async function sendRedPacket(optsSend: {
+		total_amount: number;
+		total_count?: number;
+		greeting?: string;
+	}) {
+		const dest = conversationTarget();
+		if (!dest) throw new Error('Select a conversation first');
+		const body: CreateRedPacketBody =
+			chatMode === 'private'
+				? {
+						type: 'private',
+						peer_id: dest.peer,
+						total_amount: optsSend.total_amount,
+						greeting: optsSend.greeting
+					}
+				: {
+						type: 'group',
+						group_id: dest.g,
+						total_amount: optsSend.total_amount,
+						total_count: optsSend.total_count ?? 1,
+						greeting: optsSend.greeting
+					};
+		const res = await redPacketService.create(body);
+		const msg = res.message as ChatMessage;
+		if (msg && isChatContent(msg)) {
+			const plain = await decryptMessage(msg);
+			if (belongsToConversation(plain, chatMode, myUserId, targetUser, groupId)) {
+				appendMessage(plain);
+			} else {
+				updatePreview(plain);
+			}
 		}
+		await refreshBalance();
+		return res;
+	}
+
+	async function sendVoiceMessage(blob: Blob, durationSec: number) {
 		const dest = conversationTarget();
 		if (!dest) {
-			throw new Error(chatMode === 'private' ? 'Select a user first' : 'Select a group first');
+			throw new Error(chatMode === 'private' ? '请先选择好友' : '请先选择群聊');
 		}
 		if (blob.size === 0) {
-			throw new Error('Empty recording');
+			throw new Error('录音为空');
 		}
 
-		await ensureCryptoKey();
+		// Upload may use REST (works offline from WS); then queue WS deliver with retry.
 		const uploaded = await mediaService.uploadVoice(blob, durationSec);
-		const plainLabel = '🎤 Voice message';
-		const cipher = await encryptContent(plainLabel);
-		const wire: ChatMessage = {
-			id: newMsgId(),
+		const plainLabel = '🎤 语音消息';
+		const id = newMsgId();
+		const local: ChatMessage = {
+			id,
 			type: chatMode,
 			from: myUserId,
 			to: chatMode === 'private' ? dest.peer : dest.g,
-			content: cipher,
-			encrypted: true,
+			content: plainLabel,
+			encrypted: false,
 			content_type: 'voice',
 			media_url: uploaded.url,
 			duration: durationSec > 0 ? durationSec : uploaded.duration,
 			group_id: chatMode === 'group' ? dest.g : '',
-			timestamp: Math.floor(Date.now() / 1000)
+			timestamp: Math.floor(Date.now() / 1000),
+			send_status: 'sending',
+			_local_plain: plainLabel
 		};
-
-		await wsSendJSON(wire);
-		appendMessage({ ...wire, content: plainLabel, encrypted: false });
+		appendMessage(local);
+		await deliverChatMessage(local);
+		if (messages.find((m) => m.id === id)?.send_status === 'failed') {
+			throw new Error('语音已上传，但发送失败，可点击重试');
+		}
 	}
 
 	async function refreshMyGroups() {
@@ -1156,7 +1840,7 @@ export function createChatController(opts: {
 			groupId = g;
 			await Promise.all([loadGroupHistory(g), refreshGroupMembers(g), refreshMyGroups()]);
 		} catch (err) {
-			alert((err as Error).message);
+			toastError((err as Error).message || '加入群失败');
 		}
 	}
 
@@ -1183,7 +1867,7 @@ export function createChatController(opts: {
 				groupMembers = [];
 			}
 		} catch (err) {
-			alert((err as Error).message);
+			toastError((err as Error).message || '退出群失败');
 		}
 	}
 
@@ -1196,13 +1880,16 @@ export function createChatController(opts: {
 	}
 
 	async function selectPrivateUser(userId: string, username?: string) {
+		clearUnread(userId);
 		const peer = String(userId ?? '').trim();
 		if (!peer || peer === myUserId) return;
 
 		// Switch to private + clear blink first so UI goes normal immediately on click.
+		notifyTypingStop();
 		chatMode = 'private';
 		targetUser = peer;
 		clearUnread(peer);
+		clearTypingForConversation();
 
 		if (username) {
 			rememberUsers([{ user_id: peer, username }]);
@@ -1216,9 +1903,12 @@ export function createChatController(opts: {
 	}
 
 	async function selectGroup(g: string) {
+		notifyTypingStop();
 		chatMode = 'group';
 		groupId = g;
 		groupMembers = [];
+		clearGroupUnread(g);
+		clearTypingForConversation();
 		// First time in local list → announce; already joined → silent rejoin.
 		const firstJoin = !joinedGroups.includes(g);
 		if (firstJoin) {
@@ -1250,9 +1940,11 @@ export function createChatController(opts: {
 
 	function setChatMode(mode: ChatMode) {
 		if (chatMode === mode) return;
+		notifyTypingStop();
 		chatMode = mode;
 		messages = [];
 		loadedKey = '';
+		clearTypingForConversation();
 		if (mode === 'group' && groupId.trim()) {
 			void refreshGroupMembers(groupId.trim());
 		} else if (mode === 'private') {
@@ -1311,6 +2003,21 @@ export function createChatController(opts: {
 		get unreadPeers() {
 			return unreadPeers;
 		},
+		get unreadGroups() {
+			return unreadGroups;
+		},
+		get lastPreviews() {
+			return lastPreviews;
+		},
+		get balance() {
+			return balance;
+		},
+		get typingUsers() {
+			return typingUsers;
+		},
+		get typingHint() {
+			return typingHint;
+		},
 		get connectionStatus() {
 			return connectionStatus;
 		},
@@ -1341,6 +2048,13 @@ export function createChatController(opts: {
 		unblockUser,
 		sendMessage,
 		sendVoiceMessage,
+		sendRedPacket,
+		resendMessage,
+		refreshBalance,
+		hasGroupUnread,
+		notifyTyping,
+		notifyTypingStop,
+		typingLabel,
 		recallMessage,
 		joinGroup,
 		leaveGroup,

@@ -16,6 +16,15 @@ export { chatService } from './chat.service';
 export { mediaService, buildMediaUrl } from './media.service';
 export { livekitService } from './livekit.service';
 export type { CallType, CallSignalPayload, LiveKitTokenResponse } from './livekit.service';
+export { redPacketService } from './red-packet.service';
+export type {
+	RedPacket,
+	RedPacketClaim,
+	ClaimResult,
+	WalletInfo,
+	CreateRedPacketBody,
+	CreateRedPacketResult
+} from './red-packet.service';
 export { buildWsUrl } from './ws';
 
 import { authService } from './auth.service';

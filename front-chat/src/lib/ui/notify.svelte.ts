@@ -1,0 +1,103 @@
+/**
+ * Global toast + confirm dialog (replaces window.alert / confirm).
+ */
+
+export type ToastKind = 'info' | 'success' | 'error' | 'warning';
+
+export interface ToastItem {
+	id: number;
+	kind: ToastKind;
+	title?: string;
+	message: string;
+	duration: number;
+}
+
+export interface ConfirmOptions {
+	title?: string;
+	message: string;
+	confirmText?: string;
+	cancelText?: string;
+	danger?: boolean;
+}
+
+let toastSeq = 0;
+let toasts = $state<ToastItem[]>([]);
+
+let confirmOpen = $state(false);
+let confirmOpts = $state<ConfirmOptions>({ message: '' });
+let confirmResolver: ((ok: boolean) => void) | null = null;
+
+export function getToasts(): ToastItem[] {
+	return toasts;
+}
+
+export function isConfirmOpen(): boolean {
+	return confirmOpen;
+}
+
+export function getConfirmOptions(): ConfirmOptions {
+	return confirmOpts;
+}
+
+export function toast(
+	message: string,
+	opts: { kind?: ToastKind; title?: string; duration?: number } = {}
+) {
+	const id = ++toastSeq;
+	const item: ToastItem = {
+		id,
+		kind: opts.kind ?? 'info',
+		title: opts.title,
+		message,
+		duration: opts.duration ?? 3200
+	};
+	toasts = [...toasts, item];
+	if (item.duration > 0) {
+		setTimeout(() => dismissToast(id), item.duration);
+	}
+	return id;
+}
+
+export function toastError(message: string, title = '出错了') {
+	return toast(message, { kind: 'error', title, duration: 4500 });
+}
+
+export function toastSuccess(message: string, title?: string) {
+	return toast(message, { kind: 'success', title, duration: 2800 });
+}
+
+export function toastInfo(message: string, title?: string) {
+	return toast(message, { kind: 'info', title });
+}
+
+export function dismissToast(id: number) {
+	toasts = toasts.filter((t) => t.id !== id);
+}
+
+/** Promise-based confirm modal (replaces window.confirm). */
+export function confirmDialog(opts: ConfirmOptions | string): Promise<boolean> {
+	const o: ConfirmOptions = typeof opts === 'string' ? { message: opts } : opts;
+	// Close any previous pending confirm as cancel.
+	if (confirmResolver) {
+		confirmResolver(false);
+		confirmResolver = null;
+	}
+	confirmOpts = {
+		title: o.title ?? '请确认',
+		message: o.message,
+		confirmText: o.confirmText ?? '确定',
+		cancelText: o.cancelText ?? '取消',
+		danger: o.danger ?? false
+	};
+	confirmOpen = true;
+	return new Promise<boolean>((resolve) => {
+		confirmResolver = resolve;
+	});
+}
+
+export function resolveConfirm(ok: boolean) {
+	confirmOpen = false;
+	const r = confirmResolver;
+	confirmResolver = null;
+	r?.(ok);
+}

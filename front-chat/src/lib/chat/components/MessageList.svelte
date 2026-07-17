@@ -9,9 +9,18 @@
 		myUserId: string;
 		loading?: boolean;
 		onRecall?: (msg: ChatMessage) => void;
+		onResend?: (msg: ChatMessage) => void;
+		onBalanceChange?: (balance: number) => void;
 	}
 
-	let { messages, myUserId, loading = false, onRecall }: Props = $props();
+	let {
+		messages,
+		myUserId,
+		loading = false,
+		onRecall,
+		onResend,
+		onBalanceChange
+	}: Props = $props();
 	let bottomEl: HTMLDivElement | undefined = $state();
 
 	$effect(() => {
@@ -44,13 +53,13 @@
 						<MessagesSquare class="size-6 opacity-60" />
 					</div>
 					<div class="text-center">
-						<p class="text-foreground text-sm font-medium">No messages yet</p>
-						<p class="text-xs">Select a user or group to start chatting</p>
+						<p class="text-foreground text-sm font-medium">暂无消息</p>
+						<p class="text-xs">选择好友或群聊开始会话 · 支持文字、语音与红包</p>
 					</div>
 				</div>
 			{:else}
-				{#each messages as msg, i (`${msg.id ?? ''}-${msg.timestamp ?? 0}-${msg.from}-${msg.to}-${msg.media_url ?? ''}-${msg.content}-${i}`)}
-					<MessageBubble message={msg} {myUserId} {onRecall} />
+				{#each messages as msg, i (`${msg.id ?? ''}-${msg.timestamp ?? 0}-${msg.from}-${msg.to}-${msg.media_url ?? ''}-${msg.content_type ?? ''}-${i}`)}
+					<MessageBubble message={msg} {myUserId} {onRecall} {onResend} {onBalanceChange} />
 				{/each}
 			{/if}
 			<div bind:this={bottomEl} class="h-px w-full shrink-0"></div>

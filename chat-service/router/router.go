@@ -15,6 +15,7 @@ func SetupRouter(
 	friendCtrl *controller.FriendController,
 	groupCtrl *controller.GroupController,
 	livekitCtrl *controller.LiveKitController,
+	redPacketCtrl *controller.RedPacketController,
 	authSvc *service.AuthService,
 ) *gin.Engine {
 	r := gin.Default()
@@ -29,6 +30,14 @@ func SetupRouter(
 	{
 		api.GET("/auth/me", authCtrl.GetMe)
 		api.PUT("/auth/profile", authCtrl.UpdateProfile)
+
+		// Wallet + red packets
+		if redPacketCtrl != nil {
+			api.GET("/wallet/me", redPacketCtrl.GetWallet)
+			api.POST("/red-packets", redPacketCtrl.Create)
+			api.GET("/red-packets/:id", redPacketCtrl.Get)
+			api.POST("/red-packets/:id/claim", redPacketCtrl.Claim)
+		}
 
 		// Message body encryption key (AES-GCM) for WebSocket chat content.
 		api.GET("/crypto/key", chatCtrl.GetCryptoKey)

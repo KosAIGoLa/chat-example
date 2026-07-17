@@ -68,6 +68,13 @@ func (s *ChatService) HandleMessage(client *model.Client, raw []byte) {
 	if msg.Timestamp == 0 {
 		msg.Timestamp = time.Now().Unix()
 	}
+
+	// Typing indicators are ephemeral control frames — no encrypt / no history.
+	if msg.Type == "typing" {
+		s.handleTyping(client, &msg)
+		return
+	}
+
 	// Normalize media messages.
 	if msg.ContentType == "voice" {
 		if msg.MediaURL == "" {
@@ -139,6 +146,77 @@ func (s *ChatService) replyPong(client *model.Client, clientTS int64) {
 	}
 }
 
+// handleTyping fans out ephemeral typing start/stop to peer or group members.
+// Wire: {"type":"typing","to":"<peer>","content":"start"|"stop"} or group_id set.
+func (s *ChatService) handleTyping(client *model.Client, msg *dto.ChatMessageDTO) {
+	action := msg.Content
+	if action != "start" && action != "stop" {
+		if action == "1" || action == "true" || action == "" {
+			action = "start"
+		} else {
+			action = "stop"
+		}
+	}
+
+	ev := dto.TypingEvent{
+		Type:      "typing",
+		From:      client.UserID,
+		FromName:  client.Username,
+		Content:   action,
+		Timestamp: time.Now().Unix(),
+	}
+
+	// Group typing: push to all durable members currently connected (any tab),
+	// not only hub "joined room" — users may be viewing the group without re-join race.
+	if msg.GroupID != "" {
+		ev.GroupID = msg.GroupID
+		data, err := json.Marshal(ev)
+		if err != nil {
+			return
+		}
+		delivered := map[string]bool{client.UserID: true}
+		// Hub room members (actively in group on this instance).
+		for _, c := range s.hub.GetGroupMembers(msg.GroupID) {
+			if delivered[c.UserID] {
+				continue
+			}
+			select {
+			case c.Send <- data:
+				delivered[c.UserID] = true
+			default:
+			}
+		}
+		// Durable members who are online on this instance (even if not in hub room).
+		if s.groups != nil {
+			for _, uid := range s.groups.MemberUserIDs(msg.GroupID) {
+				if delivered[uid] {
+					continue
+				}
+				if s.hub.DeliverToUser(uid, data) {
+					delivered[uid] = true
+				}
+			}
+		}
+		return
+	}
+
+	// Private typing
+	peer := msg.To
+	if peer == "" || peer == client.UserID {
+		return
+	}
+	// Soft check: allow typing only between friends when friend service is wired.
+	if s.friends != nil && !s.friends.AreFriendsStr(client.UserID, peer) {
+		return
+	}
+	ev.To = peer
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	s.hub.DeliverToUser(peer, data)
+}
+
 // encryptMessageContent ensures Content is AES-GCM ciphertext on the wire and in history.
 func (s *ChatService) encryptMessageContent(msg *dto.ChatMessageDTO) error {
 	if msg.Content == "" {
@@ -153,7 +231,7 @@ func (s *ChatService) encryptMessageContent(msg *dto.ChatMessageDTO) error {
 	return nil
 }
 
-// ensureMessageID assigns a stable id and records metadata for recall.
+// ensureMessageID assigns a stable id + monotonic seq and records metadata for recall.
 func (s *ChatService) ensureMessageID(msg *dto.ChatMessageDTO) {
 	if msg.ID == "" {
 		msg.ID = NewMessageID()
@@ -161,8 +239,15 @@ func (s *ChatService) ensureMessageID(msg *dto.ChatMessageDTO) {
 	if len(msg.ID) > 36 {
 		msg.ID = msg.ID[:36]
 	}
-	if s.store == nil || msg.ContentType == "system" {
+	// System notices still get a seq so clients can order them in history.
+	if msg.Seq == 0 && s.store != nil {
+		msg.Seq = s.store.NextSeq()
+	}
+	if s.store == nil {
 		return
+	}
+	if msg.ContentType == "system" {
+		// Persist system notices too (optional metadata); skip if store Save fails.
 	}
 	to := msg.To
 	gid := msg.GroupID
@@ -174,6 +259,7 @@ func (s *ChatService) ensureMessageID(msg *dto.ChatMessageDTO) {
 	}
 	_ = s.store.Save(&model.MessageRecord{
 		ID:         msg.ID,
+		Seq:        msg.Seq,
 		Type:       msg.Type,
 		FromUserID: msg.From,
 		ToUserID:   to,
@@ -275,6 +361,34 @@ func (s *ChatService) sendError(client *model.Client, code, message string) {
 	case client.Send <- data:
 	default:
 	}
+}
+
+// EnrichSeq fills msg.Seq from Postgres when JetStream payload lacks seq (legacy).
+func (s *ChatService) EnrichSeq(messages []dto.ChatMessageDTO) []dto.ChatMessageDTO {
+	if s.store == nil || len(messages) == 0 {
+		return messages
+	}
+	ids := make([]string, 0, len(messages))
+	for _, m := range messages {
+		if m.ID != "" && m.Seq == 0 {
+			ids = append(ids, m.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return messages
+	}
+	byID, err := s.store.SeqByIDs(ids)
+	if err != nil || len(byID) == 0 {
+		return messages
+	}
+	for i := range messages {
+		if messages[i].Seq == 0 {
+			if seq, ok := byID[messages[i].ID]; ok {
+				messages[i].Seq = seq
+			}
+		}
+	}
+	return messages
 }
 
 // ApplyRecalls marks recalled flags on history messages using the store.

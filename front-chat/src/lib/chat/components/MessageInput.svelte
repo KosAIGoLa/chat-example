@@ -10,7 +10,6 @@
 	import X from '@lucide/svelte/icons/x';
 	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
 	import Info from '@lucide/svelte/icons/info';
-
 	const MAX_RECORD_SEC = 60;
 
 	interface Props {
@@ -18,8 +17,13 @@
 		targetUser: string;
 		groupId: string;
 		value?: string;
+		/** Remote users typing label, e.g. "Alice 正在打字…" */
+		typingHint?: string;
 		onSend: () => void;
 		onSendVoice: (blob: Blob, durationSec: number) => Promise<void>;
+		onOpenRedPacket?: () => void;
+		/** Called when local user types in the input (throttled by parent). */
+		onTyping?: () => void;
 	}
 
 	let {
@@ -27,8 +31,11 @@
 		targetUser,
 		groupId,
 		value = $bindable(''),
+		typingHint = '',
 		onSend,
-		onSendVoice
+		onSendVoice,
+		onOpenRedPacket,
+		onTyping
 	}: Props = $props();
 
 	let recording = $state(false);
@@ -48,19 +55,35 @@
 	);
 
 	const hint = $derived(
-		chatMode === 'private'
-			? 'Select a target user to send private messages'
-			: 'Join or select a group to send group messages'
+		chatMode === 'private' ? '选择好友后发送私聊、语音或红包' : '选择群聊后发送消息、语音或拼手气红包'
 	);
 
 	const peerLabel = $derived(
-		chatMode === 'private' ? `DM · ${targetUser}` : `Group · #${groupId}`
+		chatMode === 'private' ? `私聊 · ${targetUser}` : `群 · #${groupId}`
 	);
 
 	function handleSubmit(e: Event) {
 		e.preventDefault();
 		if (recording || uploading) return;
 		onSend();
+	}
+
+	function handleInput() {
+		// Fire for every input change including Chinese IME composition updates.
+		onTyping?.();
+	}
+
+	function handleKeydown(e: KeyboardEvent) {
+		// Extra path for keys that may not always emit input the same way.
+		if (e.key === 'Process') return;
+		if (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Enter') {
+			onTyping?.();
+		}
+	}
+
+	function handleCompositionUpdate() {
+		// Chinese / Japanese IME: keep broadcasting while composing.
+		onTyping?.();
 	}
 
 	function pickMimeType(): string | undefined {
@@ -209,6 +232,23 @@
 </script>
 
 <div class="bg-background border-t p-3 md:p-4">
+	{#if typingHint}
+		<div
+			class="mb-2 flex items-center gap-2 rounded-lg bg-emerald-500/10 px-3 py-1.5 text-xs text-emerald-700 dark:text-emerald-300"
+		>
+			<span class="inline-flex gap-0.5">
+				<span class="size-1.5 animate-bounce rounded-full bg-emerald-500 [animation-delay:0ms]"
+				></span>
+				<span
+					class="size-1.5 animate-bounce rounded-full bg-emerald-500 [animation-delay:120ms]"
+				></span>
+				<span
+					class="size-1.5 animate-bounce rounded-full bg-emerald-500 [animation-delay:240ms]"
+				></span>
+			</span>
+			<span class="truncate font-medium">{typingHint}</span>
+		</div>
+	{/if}
 	{#if !canSend}
 		<div
 			class="text-muted-foreground bg-muted/40 flex items-center gap-2 rounded-lg border border-dashed px-4 py-3 text-sm"
@@ -266,12 +306,34 @@
 				{/if}
 				<Input
 					bind:value
-					placeholder="Type a message…"
+					placeholder="输入消息…"
 					class="h-11"
 					autocomplete="off"
 					disabled={uploading}
+					oninput={handleInput}
+					onkeydown={handleKeydown}
+					oncompositionstart={handleCompositionUpdate}
+					oncompositionupdate={handleCompositionUpdate}
+					oncompositionend={handleCompositionUpdate}
 				/>
 			</div>
+			{#if onOpenRedPacket}
+				<Button
+					type="button"
+					size="lg"
+					class="h-11 shrink-0 border-0 bg-gradient-to-br from-[#f04a3a] to-[#c02218] text-white shadow-sm hover:brightness-110"
+					disabled={uploading}
+					onclick={onOpenRedPacket}
+					aria-label="发红包"
+					title="发红包"
+				>
+					<span
+						class="flex size-5 items-center justify-center rounded-full bg-gradient-to-br from-[#ffe9a8] to-[#d4a017] text-[10px] font-bold text-[#8b1a12]"
+						style="font-family: Songti SC, STSong, serif;">福</span
+					>
+					<span class="hidden sm:inline">红包</span>
+				</Button>
+			{/if}
 			<Button
 				type="button"
 				variant="outline"
@@ -280,7 +342,7 @@
 				disabled={uploading}
 				onclick={startRecording}
 				aria-label="Record voice message"
-				title="Voice message"
+				title="语音消息"
 			>
 				{#if uploading}
 					<LoaderCircle class="size-4 animate-spin" />
@@ -295,7 +357,7 @@
 				disabled={!value.trim() || uploading}
 			>
 				<Send class="size-4" />
-				Send
+				发送
 			</Button>
 		</form>
 	{/if}

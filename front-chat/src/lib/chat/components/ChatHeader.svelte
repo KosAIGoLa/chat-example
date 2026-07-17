@@ -14,12 +14,15 @@
 	import WifiOff from '@lucide/svelte/icons/wifi-off';
 	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
 	import UserCog from '@lucide/svelte/icons/user-cog';
+	import Coins from '@lucide/svelte/icons/coins';
 
 	interface Props {
 		username: string;
 		connectionStatus: ConnectionStatus;
 		/** Current reconnect attempt (0 when idle / connected). */
 		reconnectAttempt?: number;
+		/** Virtual wallet balance. */
+		balance?: number;
 		onLogout: () => void;
 		/** Manual reconnect when stuck disconnected. */
 		onReconnect?: () => void;
@@ -31,6 +34,7 @@
 		username,
 		connectionStatus,
 		reconnectAttempt = 0,
+		balance = 0,
 		onLogout,
 		onReconnect,
 		onProfileUpdated
@@ -124,24 +128,32 @@
 				</Badge>
 				{#if connectionStatus === 'disconnected' && onReconnect}
 					<Button variant="ghost" size="sm" class="h-7 px-2 text-xs" onclick={onReconnect}>
-						Reconnect
+						重连
 					</Button>
 				{/if}
 			</div>
 		</div>
 
 		<div class="flex items-center gap-2">
+			<Badge
+				variant="secondary"
+				class="gap-1 border border-amber-500/30 bg-amber-500/10 font-medium text-amber-700 dark:text-amber-300"
+				title="虚拟币余额"
+			>
+				<Coins class="size-3.5" />
+				{balance}
+			</Badge>
 			<span class="text-muted-foreground hidden text-sm sm:inline">
-				Signed in as <span class="text-foreground font-medium">{username}</span>
+				<span class="text-foreground font-medium">{username}</span>
 			</span>
 			<Separator orientation="vertical" class="hidden h-5 sm:block" />
-			<Button variant="outline" size="sm" onclick={openProfile} title="Edit profile">
+			<Button variant="outline" size="sm" onclick={openProfile} title="个人资料">
 				<UserCog class="size-4" />
-				<span class="hidden sm:inline">Profile</span>
+				<span class="hidden sm:inline">资料</span>
 			</Button>
 			<Button variant="outline" size="sm" onclick={onLogout}>
 				<LogOut class="size-4" />
-				<span class="hidden sm:inline">Logout</span>
+				<span class="hidden sm:inline">退出</span>
 			</Button>
 		</div>
 	</div>

@@ -19,8 +19,14 @@ type Hub struct {
 	// groupID -> set of connections currently in the group
 	groups    map[string]map[*model.Client]struct{}
 	nats      *NATSService
+	offline   *OfflineService
 	presenceT *time.Ticker
 	mu        sync.RWMutex
+}
+
+// SetOffline attaches the offline message flusher (called after WS register).
+func (h *Hub) SetOffline(o *OfflineService) {
+	h.offline = o
 }
 
 // NewHub creates a new Hub.
@@ -94,6 +100,24 @@ func (h *Hub) Register(client *model.Client) {
 		if err := h.nats.PublishPresence(client.UserID, client.Username, true); err != nil {
 			log.Printf("[Hub] failed to publish online presence for %s: %v", client.UserID, err)
 		}
+	}
+
+	// Push offline private messages after WritePump is started by the controller.
+	// Defer slightly so the client has a chance to start reading.
+	if h.offline != nil {
+		uid := client.UserID
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			n := h.offline.Flush(uid)
+			if n > 0 {
+				// Optional sync marker so clients can refresh unread badges.
+				meta, _ := json.Marshal(map[string]interface{}{
+					"type":  "offline_sync",
+					"count": n,
+				})
+				h.DeliverToUser(uid, meta)
+			}
+		}()
 	}
 }
 

@@ -23,7 +23,13 @@ type NATSService struct {
 	js         nats.JetStreamContext
 	kv         nats.KeyValue
 	hub        *Hub
+	offline    *OfflineService
 	instanceID string
+}
+
+// SetOffline wires the offline inbox used when private deliver fails.
+func (ns *NATSService) SetOffline(o *OfflineService) {
+	ns.offline = o
 }
 
 const (
@@ -203,7 +209,7 @@ func (ns *NATSService) handleChatEvent(m *nats.Msg) {
 }
 
 // handlePrivateMessage is the NATS subscription handler for private messages.
-// It delivers the message to the local client if they are connected to this instance.
+// It delivers to local clients, and always persists to offline inbox until ACK/delete.
 func (ns *NATSService) handlePrivateMessage(m *nats.Msg) {
 	var msg dto.ChatMessageDTO
 	if err := json.Unmarshal(m.Data, &msg); err != nil {
@@ -212,10 +218,14 @@ func (ns *NATSService) handlePrivateMessage(m *nats.Msg) {
 	}
 
 	data, _ := json.Marshal(msg)
-	// Deliver to every local tab/connection for the recipient.
-	if !ns.hub.DeliverToUser(msg.To, data) {
-		// Target user is not on this instance (or all buffers full) — ignore.
+	// Live deliver on this instance; if recipient is offline here, park in offline inbox.
+	if ns.hub.DeliverToUser(msg.To, data) {
 		return
+	}
+	if ns.offline != nil && msg.ID != "" && msg.To != "" {
+		if err := ns.offline.Save(msg.ID, msg.To, msg.From, string(data)); err != nil {
+			log.Printf("[NATS] offline save failed: %v", err)
+		}
 	}
 }
 
@@ -587,14 +597,69 @@ func (ns *NATSService) GetPrivateHistory(userA, userB string, count int) ([]dto.
 }
 
 func sortChatMessages(msgs []dto.ChatMessageDTO) {
-	// Insertion sort is fine for ≤ a few hundred history items.
+	SortChatMessages(msgs)
+}
+
+// SortChatMessages orders by seq (prefer), then timestamp, then id.
+func SortChatMessages(msgs []dto.ChatMessageDTO) {
 	for i := 1; i < len(msgs); i++ {
 		j := i
-		for j > 0 && msgs[j-1].Timestamp > msgs[j].Timestamp {
+		for j > 0 && chatMsgLess(msgs[j], msgs[j-1]) {
 			msgs[j-1], msgs[j] = msgs[j], msgs[j-1]
 			j--
 		}
 	}
+}
+
+// chatMsgLess reports whether a should appear before b (ascending order).
+func chatMsgLess(a, b dto.ChatMessageDTO) bool {
+	// Prefer seq when both non-zero.
+	if a.Seq > 0 && b.Seq > 0 {
+		return a.Seq < b.Seq
+	}
+	if a.Seq > 0 && b.Seq == 0 {
+		// sequenced messages are newer than legacy — sort by timestamp fallback
+		if a.Timestamp != b.Timestamp {
+			return a.Timestamp < b.Timestamp
+		}
+		return a.Seq < b.Seq
+	}
+	if a.Seq == 0 && b.Seq > 0 {
+		if a.Timestamp != b.Timestamp {
+			return a.Timestamp < b.Timestamp
+		}
+		return true
+	}
+	if a.Timestamp != b.Timestamp {
+		return a.Timestamp < b.Timestamp
+	}
+	// Stable tie-break by id.
+	return a.ID < b.ID
+}
+
+// MaxSeq returns the highest seq in the slice (0 if empty / all zero).
+func MaxSeq(msgs []dto.ChatMessageDTO) int64 {
+	var max int64
+	for _, m := range msgs {
+		if m.Seq > max {
+			max = m.Seq
+		}
+	}
+	return max
+}
+
+// FilterSinceSeq keeps messages with Seq > since (messages with seq=0 kept only when since=0).
+func FilterSinceSeq(msgs []dto.ChatMessageDTO, since int64) []dto.ChatMessageDTO {
+	if since <= 0 {
+		return msgs
+	}
+	out := make([]dto.ChatMessageDTO, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Seq > since {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // --- Lifecycle ---

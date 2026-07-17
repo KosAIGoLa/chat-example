@@ -45,6 +45,11 @@ func main() {
 	// Profile username changes update live presence via hub.
 	authCtrl.SetHub(hub)
 
+	// Offline private message inbox
+	offlineSvc := service.NewOfflineService(db, hub)
+	hub.SetOffline(offlineSvc)
+	natsSvc.SetOffline(offlineSvc)
+
 	// Message content encryption (AES-256-GCM). Prefer MSG_CRYPTO_KEY over JWT_SECRET.
 	msgCrypto := service.NewMsgCrypto(os.Getenv("MSG_CRYPTO_KEY"))
 	if os.Getenv("MSG_CRYPTO_KEY") == "" {
@@ -65,6 +70,11 @@ func main() {
 	friendCtrl := controller.NewFriendController(friendSvc)
 	groupCtrl := controller.NewGroupController(groupSvc)
 
+	// Wallet + red packets
+	walletSvc := service.NewWalletService(db)
+	rpSvc := service.NewRedPacketService(db, walletSvc, friendSvc, groupSvc, hub, natsSvc, msgStore)
+	redPacketCtrl := controller.NewRedPacketController(rpSvc, walletSvc)
+
 	// LiveKit WebRTC tokens (private call + group meeting)
 	lkSvc := service.NewLiveKitService()
 	livekitCtrl := controller.NewLiveKitController(lkSvc, hub, friendSvc, groupSvc)
@@ -80,9 +90,9 @@ func main() {
 	}
 	mediaCtrl := controller.NewMediaController(mediaSvc)
 
-	r := router.SetupRouter(chatCtrl, authCtrl, mediaCtrl, friendCtrl, groupCtrl, livekitCtrl, authSvc)
+	r := router.SetupRouter(chatCtrl, authCtrl, mediaCtrl, friendCtrl, groupCtrl, livekitCtrl, redPacketCtrl, authSvc)
 
-	log.Printf("Server starting on %s (NATS: %s, media: %s, msg-crypto: AES-GCM, livekit: %s)",
+	log.Printf("Server starting on %s (NATS: %s, media: %s, msg-crypto: AES-GCM, livekit: %s, wallet+offline+redpacket: on)",
 		addr, natsURL, mediaDir, lkSvc.URL())
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Server failed: %v", err)

@@ -1,6 +1,6 @@
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
 export type ChatMode = 'private' | 'group';
-export type ContentType = 'text' | 'voice' | 'system';
+export type ContentType = 'text' | 'voice' | 'system' | 'red_packet';
 
 /** Application-level WS heartbeat (client → server). */
 export interface PingMessage {
@@ -19,6 +19,8 @@ export interface PongMessage {
 export interface ChatMessage {
 	/** Stable id for recall (client-generated UUID hex / server-issued). */
 	id?: string;
+	/** Monotonic server sequence for ordering + incremental sync (since_seq). */
+	seq?: number;
 	type:
 		| 'private'
 		| 'group'
@@ -37,16 +39,64 @@ export interface ChatMessage {
 	content: string;
 	group_id?: string;
 	timestamp?: number;
-	/** "text" (default) or "voice" | "system" */
+	/** "text" (default) or "voice" | "system" | "red_packet" */
 	content_type?: ContentType | string;
 	/** Voice file URL path, e.g. /api/voice/xxx.webm */
 	media_url?: string;
 	/** Voice duration in seconds */
 	duration?: number;
+	/** Red packet id when content_type is red_packet. */
+	red_packet_id?: string;
 	/** True when content is AES-GCM ciphertext. */
 	encrypted?: boolean;
 	/** True after successful recall within the window. */
 	recalled?: boolean;
+	/**
+	 * Client-only send pipeline status.
+	 * pending/sending: waiting for network / retrying
+	 * sent: delivered to server (WS write ok)
+	 * failed: exhausted retries — user may tap resend
+	 */
+	send_status?: 'pending' | 'sending' | 'sent' | 'failed';
+	/** Client-only: plaintext for resend (not on wire). */
+	_local_plain?: string;
+}
+
+/** Server push after someone claims a red packet. */
+export interface RedPacketClaimedEvent {
+	type: 'red_packet_claimed';
+	packet_id: string;
+	user_id: string;
+	username: string;
+	amount: number;
+	remaining_count: number;
+	finished: boolean;
+	timestamp?: number;
+}
+
+/** Server push after offline inbox flush. */
+export interface OfflineSyncEvent {
+	type: 'offline_sync';
+	count: number;
+}
+
+/** Ephemeral typing indicator (private or group). content: start | stop */
+export interface TypingEvent {
+	type: 'typing';
+	from: string;
+	from_name?: string;
+	to?: string;
+	group_id?: string;
+	content: 'start' | 'stop' | string;
+	timestamp?: number;
+}
+
+/** One person currently typing in the active conversation. */
+export interface TypingUser {
+	user_id: string;
+	username: string;
+	/** local expire ms */
+	until: number;
 }
 
 /** Server push when a message is recalled. */
@@ -183,4 +233,8 @@ export interface ChatUser {
 export interface HistoryResponse {
 	messages: ChatMessage[];
 	count: number;
+	/** Highest seq in this response (0 if none / legacy). */
+	max_seq?: number;
+	/** Echo of the since_seq query used for the request. */
+	since_seq?: number;
 }

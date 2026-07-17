@@ -49,6 +49,7 @@ func (ctrl *AuthController) Register(c *gin.Context) {
 		Data: dto.UserInfo{
 			ID:       user.ID,
 			Username: user.Username,
+			Balance:  user.Balance,
 		},
 	})
 }
@@ -80,6 +81,7 @@ func (ctrl *AuthController) Login(c *gin.Context) {
 			User: dto.UserInfo{
 				ID:       user.ID,
 				Username: user.Username,
+				Balance:  user.Balance,
 			},
 		},
 	})
@@ -104,6 +106,7 @@ func (ctrl *AuthController) GetMe(c *gin.Context) {
 		Data: dto.UserInfo{
 			ID:       user.ID,
 			Username: user.Username,
+			Balance:  user.Balance,
 		},
 	})
 }
@@ -152,6 +155,7 @@ func (ctrl *AuthController) UpdateProfile(c *gin.Context) {
 			User: dto.UserInfo{
 				ID:       user.ID,
 				Username: user.Username,
+				Balance:  user.Balance,
 			},
 		},
 	})

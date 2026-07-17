@@ -37,6 +37,7 @@ func (s *AuthService) Register(username, password string) (*model.User, error) {
 	user := model.User{
 		Username: username,
 		Password: string(hashed),
+		Balance:  InitialBalance(),
 	}
 	if err := s.db.Create(&user).Error; err != nil {
 		return nil, err

@@ -303,6 +303,28 @@ func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
 		err      error
 	)
 
+	var sinceTS int64
+	if s := c.Query("since_ts"); s != "" {
+		if v, err := strconv.ParseInt(s, 10, 64); err == nil && v > 0 {
+			sinceTS = v
+		}
+	}
+	// Preferred incremental cursor: only messages with seq > since_seq.
+	var sinceSeq int64
+	if s := c.Query("since_seq"); s != "" {
+		if v, err := strconv.ParseInt(s, 10, 64); err == nil && v > 0 {
+			sinceSeq = v
+		}
+	}
+
+	// When fetching deltas, pull a larger window so filter still has enough.
+	fetchCount := count
+	if sinceSeq > 0 || sinceTS > 0 {
+		if fetchCount < 200 {
+			fetchCount = 200
+		}
+	}
+
 	switch c.Query("type") {
 	case "private":
 		peerID := c.Query("peer_id")
@@ -312,7 +334,7 @@ func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
 		}
 		userIDRaw, _ := c.Get("user_id")
 		myID := strconv.FormatUint(uint64(userIDRaw.(uint)), 10)
-		messages, err = ctrl.natsSvc.GetPrivateHistory(myID, peerID, count)
+		messages, err = ctrl.natsSvc.GetPrivateHistory(myID, peerID, fetchCount)
 
 	case "group":
 		groupID := c.Query("group_id")
@@ -320,7 +342,7 @@ func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "group_id is required for group history"})
 			return
 		}
-		messages, err = ctrl.natsSvc.GetMessageHistory(fmt.Sprintf("chat.group.%s", groupID), count)
+		messages, err = ctrl.natsSvc.GetMessageHistory(fmt.Sprintf("chat.group.%s", groupID), fetchCount)
 
 	default:
 		// Backward-compatible subject filter.
@@ -332,7 +354,7 @@ func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
 			})
 			return
 		}
-		messages, err = ctrl.natsSvc.GetMessageHistory(subject, count)
+		messages, err = ctrl.natsSvc.GetMessageHistory(subject, fetchCount)
 	}
 
 	if err != nil {
@@ -342,11 +364,37 @@ func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
 	if messages == nil {
 		messages = []dto.ChatMessageDTO{}
 	}
+	// Fill seq from Postgres for JetStream payloads that predate seq-on-wire,
+	// then sort + filter so since_seq works for backfilled records.
+	messages = ctrl.chatSvc.EnrichSeq(messages)
+	service.SortChatMessages(messages)
+	// Incremental sync: prefer since_seq; fall back to since_ts for older clients.
+	if sinceSeq > 0 {
+		messages = service.FilterSinceSeq(messages, sinceSeq)
+	} else if sinceTS > 0 {
+		filtered := make([]dto.ChatMessageDTO, 0, len(messages))
+		for _, m := range messages {
+			if m.Timestamp > sinceTS {
+				filtered = append(filtered, m)
+			}
+		}
+		messages = filtered
+	}
+	// Cap response size after filter (latest `count` by order).
+	if len(messages) > count {
+		messages = messages[len(messages)-count:]
+	}
 	// Mask recalled messages for history viewers.
 	messages = ctrl.chatSvc.ApplyRecalls(messages)
+	maxSeq := service.MaxSeq(messages)
 	c.JSON(http.StatusOK, dto.APIResponseDTO{
 		Code:    200,
 		Message: "success",
-		Data:    gin.H{"messages": messages, "count": len(messages)},
+		Data: gin.H{
+			"messages":  messages,
+			"count":     len(messages),
+			"max_seq":   maxSeq,
+			"since_seq": sinceSeq,
+		},
 	})
 }

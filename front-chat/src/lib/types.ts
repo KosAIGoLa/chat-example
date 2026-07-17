@@ -1,6 +1,7 @@
 export interface UserInfo {
 	id: number;
 	username: string;
+	balance?: number;
 }
 
 export interface LoginResponse {

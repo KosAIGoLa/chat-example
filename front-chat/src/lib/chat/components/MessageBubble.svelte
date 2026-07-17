@@ -5,6 +5,7 @@
 		formatDuration,
 		formatMessageLabel,
 		isOwnMessage,
+		isRedPacketMessage,
 		isSystemMessage,
 		isVoiceMessage
 	} from '../utils';
@@ -14,20 +15,35 @@
 	import { Button } from '$lib/components/ui/button';
 	import Mic from '@lucide/svelte/icons/mic';
 	import Undo2 from '@lucide/svelte/icons/undo-2';
+	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
+	import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+	import CircleAlert from '@lucide/svelte/icons/circle-alert';
+	import RedPacketCard from './RedPacketCard.svelte';
 
 	interface Props {
 		message: ChatMessage;
 		myUserId: string;
 		onRecall?: (msg: ChatMessage) => void;
+		onResend?: (msg: ChatMessage) => void;
+		onBalanceChange?: (balance: number) => void;
 	}
 
-	let { message, myUserId, onRecall }: Props = $props();
+	let { message, myUserId, onRecall, onResend, onBalanceChange }: Props = $props();
 
 	const own = $derived(isOwnMessage(message, myUserId));
 	const voice = $derived(isVoiceMessage(message));
 	const system = $derived(isSystemMessage(message));
+	const redPacket = $derived(isRedPacketMessage(message));
 	const recalled = $derived(!!message.recalled);
-	const showRecall = $derived(canRecallMessage(message, myUserId) && !!onRecall);
+	const showRecall = $derived(
+		canRecallMessage(message, myUserId) &&
+			!!onRecall &&
+			message.send_status !== 'sending' &&
+			message.send_status !== 'failed' &&
+			message.send_status !== 'pending'
+	);
+	const sending = $derived(message.send_status === 'sending' || message.send_status === 'pending');
+	const failed = $derived(message.send_status === 'failed');
 	const initial = $derived((message.from || '?').slice(0, 1).toUpperCase());
 	const timeLabel = $derived(
 		message.timestamp
@@ -89,7 +105,7 @@
 				{/if}
 			</div>
 			<div class="flex items-end gap-1">
-				{#if showRecall && own}
+				{#if showRecall && own && !redPacket}
 					<Button
 						variant="ghost"
 						size="icon-xs"
@@ -100,47 +116,85 @@
 						<Undo2 class="size-3.5" />
 					</Button>
 				{/if}
-				<div
-					class={cn(
-						'rounded-2xl px-3.5 py-2 text-sm leading-relaxed shadow-xs',
-						own
-							? 'bg-primary text-primary-foreground rounded-br-md'
-							: 'bg-muted text-foreground rounded-bl-md',
-						voice && 'min-w-[12rem] py-2.5'
-					)}
-				>
-					{#if voice}
-						<div class="flex flex-col gap-1.5">
-							<div class="flex items-center gap-2 text-xs font-medium opacity-90">
-								<Mic class="size-3.5 shrink-0" />
-								<span>{voiceLabel}</span>
+				{#if failed && own && onResend}
+					<Button
+						variant="ghost"
+						size="icon-xs"
+						class="text-destructive shrink-0"
+						title="点击重发"
+						onclick={() => onResend?.(message)}
+					>
+						<RotateCcw class="size-3.5" />
+					</Button>
+				{/if}
+				{#if redPacket}
+					<div class={cn(failed && 'opacity-70')}>
+						<RedPacketCard {message} {myUserId} {own} {onBalanceChange} />
+					</div>
+				{:else}
+					<div
+						class={cn(
+							'rounded-2xl px-3.5 py-2 text-sm leading-relaxed shadow-xs',
+							own
+								? 'bg-primary text-primary-foreground rounded-br-md'
+								: 'bg-muted text-foreground rounded-bl-md',
+							voice && 'min-w-[12rem] py-2.5',
+							failed && 'ring-destructive/50 opacity-80 ring-1',
+							sending && 'opacity-80'
+						)}
+					>
+						{#if voice}
+							<div class="flex flex-col gap-1.5">
+								<div class="flex items-center gap-2 text-xs font-medium opacity-90">
+									<Mic class="size-3.5 shrink-0" />
+									<span>{voiceLabel}</span>
+								</div>
+								{#if audioSrc}
+									<audio
+										controls
+										preload="metadata"
+										src={audioSrc}
+										class={cn(
+											'h-9 w-full max-w-[16rem]',
+											own ? 'accent-primary-foreground' : 'accent-primary'
+										)}
+									>
+										<track kind="captions" />
+									</audio>
+								{:else}
+									<span class="text-xs opacity-80"
+										>{message.content || 'Voice message unavailable'}</span
+									>
+								{/if}
 							</div>
-							{#if audioSrc}
-								<audio
-									controls
-									preload="metadata"
-									src={audioSrc}
-									class={cn(
-										'h-9 w-full max-w-[16rem]',
-										own ? 'accent-primary-foreground' : 'accent-primary'
-									)}
-								>
-									<track kind="captions" />
-								</audio>
-							{:else}
-								<span class="text-xs opacity-80"
-									>{message.content || 'Voice message unavailable'}</span
-								>
-							{/if}
-						</div>
-					{:else}
-						{message.content}
-					{/if}
-				</div>
-				{#if showRecall && !own}
-					<!-- never for others -->
+						{:else}
+							{message.content}
+						{/if}
+					</div>
 				{/if}
 			</div>
+			{#if own && (sending || failed)}
+				<div
+					class={cn(
+						'flex items-center gap-1 px-1 text-[11px]',
+						failed ? 'text-destructive' : 'text-muted-foreground'
+					)}
+				>
+					{#if sending}
+						<LoaderCircle class="size-3 animate-spin" />
+						<span>发送中…网络波动会自动重试</span>
+					{:else}
+						<CircleAlert class="size-3" />
+						<button
+							type="button"
+							class="underline-offset-2 hover:underline"
+							onclick={() => onResend?.(message)}
+						>
+							发送失败，点击重试
+						</button>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	</div>
 {/if}

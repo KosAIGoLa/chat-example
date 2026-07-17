@@ -18,6 +18,7 @@ type LoginResponse struct {
 type UserInfo struct {
 	ID       uint   `json:"id"`
 	Username string `json:"username"`
+	Balance  int64  `json:"balance"`
 }
 
 // UpdateProfileRequest updates the signed-in user's profile.

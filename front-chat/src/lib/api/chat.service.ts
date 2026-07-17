@@ -13,21 +13,37 @@ export const chatService = {
 		return request<OnlineUsersResponse>('/api/users/online');
 	},
 
-	getPrivateHistory(peerId: string, count = 50): Promise<HistoryResponse> {
+	/**
+	 * Private history. Prefer since_seq for incremental fetch after last cached message.
+	 * since_ts kept for backward compatibility.
+	 */
+	getPrivateHistory(
+		peerId: string,
+		count = 50,
+		opts?: { sinceSeq?: number; sinceTs?: number }
+	): Promise<HistoryResponse> {
 		const q = new URLSearchParams({
 			type: 'private',
 			peer_id: peerId,
 			count: String(count)
 		});
+		if (opts?.sinceSeq && opts.sinceSeq > 0) q.set('since_seq', String(opts.sinceSeq));
+		else if (opts?.sinceTs && opts.sinceTs > 0) q.set('since_ts', String(opts.sinceTs));
 		return request<HistoryResponse>(`/api/history?${q}`);
 	},
 
-	getGroupHistory(groupId: string, count = 50): Promise<HistoryResponse> {
+	getGroupHistory(
+		groupId: string,
+		count = 50,
+		opts?: { sinceSeq?: number; sinceTs?: number }
+	): Promise<HistoryResponse> {
 		const q = new URLSearchParams({
 			type: 'group',
 			group_id: groupId,
 			count: String(count)
 		});
+		if (opts?.sinceSeq && opts.sinceSeq > 0) q.set('since_seq', String(opts.sinceSeq));
+		else if (opts?.sinceTs && opts.sinceTs > 0) q.set('since_ts', String(opts.sinceTs));
 		return request<HistoryResponse>(`/api/history?${q}`);
 	}
 };

@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import './layout.css';
 	import favicon from '$lib/assets/favicon.svg';
+	import NotifyHost from '$lib/ui/NotifyHost.svelte';
 
 	let { children } = $props();
 
@@ -20,3 +21,4 @@
 </svelte:head>
 
 {@render children()}
+<NotifyHost />

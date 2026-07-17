@@ -214,6 +214,19 @@ func (s *GroupService) IsMember(userID uint, groupID string) bool {
 	return n > 0
 }
 
+// MemberUserIDs returns durable member user ids as strings (for typing fan-out etc.).
+func (s *GroupService) MemberUserIDs(groupID string) []string {
+	var rows []model.GroupMember
+	if err := s.db.Where("group_id = ?", groupID).Find(&rows).Error; err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, strconv.FormatUint(uint64(r.UserID), 10))
+	}
+	return out
+}
+
 // Exists reports whether a group row is present.
 func (s *GroupService) Exists(groupID string) bool {
 	var n int64

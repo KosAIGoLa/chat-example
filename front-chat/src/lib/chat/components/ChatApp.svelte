@@ -9,15 +9,23 @@
 	import MessageList from './MessageList.svelte';
 	import MessageInput from './MessageInput.svelte';
 	import CallPanel from './CallPanel.svelte';
+	import SendRedPacketDialog from './SendRedPacketDialog.svelte';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import Hash from '@lucide/svelte/icons/hash';
 	import User from '@lucide/svelte/icons/user';
 	import Phone from '@lucide/svelte/icons/phone';
 	import Video from '@lucide/svelte/icons/video';
+	import Users from '@lucide/svelte/icons/users';
+	import * as Sheet from '$lib/components/ui/sheet';
+	import { toastError, toastInfo } from '$lib/ui/notify.svelte';
+	import { typingUI } from '../typing-ui.svelte';
 
 	const userId = auth.user ? String(auth.user.id) : '';
 	let displayUsername = $state(auth.user?.username ?? '');
+	let balance = $state(auth.user?.balance ?? 0);
+	let redPacketOpen = $state(false);
+	let membersOpen = $state(false);
 
 	const call = createCallController({
 		userId,
@@ -30,8 +38,14 @@
 		onUnauthorized: () => {
 			window.location.href = '/login';
 		},
-		onCallEvent: (ev) => call.handleCallEvent(ev)
+		onCallEvent: (ev) => call.handleCallEvent(ev),
+		onBalanceChange: (b) => {
+			balance = b;
+		}
 	});
+
+	/** Reactive module store — updates even from async WS handlers. */
+	const typingHint = $derived(typingUI.hint);
 
 	// UI-local fields bound to inputs; synced into controller on action
 	let targetUser = $state('');
@@ -39,15 +53,40 @@
 	let inputText = $state('');
 	let callBusy = $state(false);
 
+	// Keep header balance in sync with controller.
+	$effect(() => {
+		balance = chat.balance;
+	});
+
 	const conversationTitle = $derived(
 		chat.chatMode === 'private'
 			? targetUser
-				? `Private · ${chat.displayName(targetUser)}`
-				: 'Private chat'
+				? `私聊 · ${chat.displayName(targetUser)}`
+				: '选择好友开始聊天'
 			: groupId
 				? `#${chat.groupDisplayName(groupId)}`
-				: 'Group chat'
+				: '选择或加入群聊'
 	);
+
+	function emitTyping() {
+		// Group tab + selected group → always group typing (群主/成员都适用).
+		const resolvedMode: 'private' | 'group' =
+			chat.chatMode === 'group' && groupId.trim()
+				? 'group'
+				: chat.chatMode === 'private' && targetUser.trim()
+					? 'private'
+					: groupId.trim()
+						? 'group'
+						: 'private';
+
+		chat.targetUser = targetUser;
+		chat.groupId = groupId;
+		chat.notifyTyping({
+			mode: resolvedMode,
+			peer: targetUser.trim(),
+			group: groupId.trim()
+		});
+	}
 
 	async function selectUser(peerId: string, peerName?: string) {
 		if (!peerId || peerId === userId) return;
@@ -68,6 +107,12 @@
 		chat.targetUser = targetUser;
 		chat.groupId = groupId;
 		chat.inputText = inputText;
+		// Sending ends local typing advertisement immediately.
+		chat.notifyTypingStop({
+			mode: chat.chatMode === 'group' && groupId.trim() ? 'group' : 'private',
+			peer: targetUser.trim(),
+			group: groupId.trim()
+		});
 		await chat.sendMessage();
 		inputText = chat.inputText;
 	}
@@ -109,10 +154,10 @@
 			} else if (chat.chatMode === 'group' && groupId.trim()) {
 				await call.startGroupMeeting(groupId.trim(), media);
 			} else {
-				alert(chat.chatMode === 'private' ? '请先选择好友' : '请先选择群');
+				toastInfo(chat.chatMode === 'private' ? '请先选择好友' : '请先选择群');
 			}
 		} catch (err) {
-			alert((err as Error).message || '发起通话失败');
+			toastError((err as Error).message || '发起通话失败');
 		} finally {
 			callBusy = false;
 		}
@@ -144,13 +189,14 @@
 		username={displayUsername}
 		connectionStatus={chat.connectionStatus}
 		reconnectAttempt={chat.reconnectAttempt}
+		{balance}
 		onLogout={handleLogout}
 		onReconnect={() => chat.reconnectNow()}
 		{onProfileUpdated}
 	/>
 
 	<div class="flex min-h-0 flex-1 overflow-hidden">
-		<!-- Col 1: Private online users OR groups list -->
+		<!-- Col 1: conversation list -->
 		<ChatSidebar
 			chatMode={chat.chatMode}
 			bind:targetUser
@@ -163,6 +209,8 @@
 			onlineUsers={chat.onlineUsers}
 			myUserId={chat.myUserId}
 			unreadPeers={chat.unreadPeers}
+			unreadGroups={chat.unreadGroups}
+			lastPreviews={chat.lastPreviews}
 			onModeChange={(m) => chat.setChatMode(m)}
 			onJoinGroup={joinGroup}
 			onLeaveGroup={(g) => {
@@ -211,28 +259,27 @@
 			callDisabled={callBusy || call.phase !== 'idle'}
 		/>
 
-		<!-- Col 2: group members (only in Group mode) — to the right of groups -->
-		{#if chat.chatMode === 'group'}
-			<GroupMembersPanel
-				groupId={groupId}
-				members={chat.groupMembers}
-				myUserId={chat.myUserId}
-				unreadPeers={chat.unreadPeers}
-				onRefresh={() => chat.refreshGroupMembers()}
-				onSelectUser={selectUser}
-			/>
-		{/if}
-
-		<main class="flex min-w-0 flex-1 flex-col">
+		<main class="bg-muted/20 flex min-w-0 flex-1 flex-col">
 			<div
-				class="bg-background/80 flex h-12 shrink-0 items-center gap-2 border-b px-4 backdrop-blur md:px-6"
+				class="bg-background/90 flex h-14 shrink-0 items-center gap-2 border-b px-4 backdrop-blur md:px-6"
 			>
 				{#if chat.chatMode === 'private'}
-					<User class="text-muted-foreground size-4" />
+					<div class="bg-primary/10 text-primary flex size-8 items-center justify-center rounded-full">
+						<User class="size-4" />
+					</div>
 				{:else}
-					<Hash class="text-muted-foreground size-4" />
+					<div class="bg-primary/10 text-primary flex size-8 items-center justify-center rounded-full">
+						<Hash class="size-4" />
+					</div>
 				{/if}
-				<span class="min-w-0 flex-1 truncate text-sm font-medium">{conversationTitle}</span>
+				<div class="min-w-0 flex-1">
+					<span class="block truncate text-sm font-semibold">{conversationTitle}</span>
+					{#if typingHint}
+						<span class="block truncate text-[11px] font-normal text-emerald-500">
+							{typingHint}
+						</span>
+					{/if}
+				</div>
 				<div class="flex shrink-0 items-center gap-1.5">
 					{#if chat.chatMode === 'private' && targetUser.trim()}
 						<Button
@@ -244,7 +291,7 @@
 							title="语音通话（仅麦克风）"
 						>
 							<Phone class="size-4" />
-							<span>语音</span>
+							<span class="hidden sm:inline">语音</span>
 						</Button>
 						<Button
 							variant="default"
@@ -255,7 +302,7 @@
 							title="视讯通话（摄像头+麦克风）"
 						>
 							<Video class="size-4" />
-							<span>视讯</span>
+							<span class="hidden sm:inline">视讯</span>
 						</Button>
 					{:else if chat.chatMode === 'group' && groupId.trim()}
 						<Button
@@ -267,7 +314,7 @@
 							title="群语音会议"
 						>
 							<Phone class="size-4" />
-							<span>语音</span>
+							<span class="hidden sm:inline">语音</span>
 						</Button>
 						<Button
 							variant="default"
@@ -278,11 +325,21 @@
 							title="群视讯会议"
 						>
 							<Video class="size-4" />
-							<span>视讯</span>
+							<span class="hidden sm:inline">视讯</span>
+						</Button>
+						<Button
+							variant="ghost"
+							size="sm"
+							class="h-8 gap-1.5 px-2.5"
+							onclick={() => (membersOpen = true)}
+							title="群成员"
+						>
+							<Users class="size-4" />
+							<span class="hidden sm:inline">成员</span>
 						</Button>
 					{/if}
 					{#if chat.historyLoading}
-						<Badge variant="secondary" class="font-normal">Loading…</Badge>
+						<Badge variant="secondary" class="font-normal">同步中…</Badge>
 					{:else if chat.messages.length > 0}
 						<Badge variant="outline" class="text-muted-foreground font-normal">
 							{chat.messages.length}
@@ -296,17 +353,71 @@
 				myUserId={chat.myUserId}
 				loading={chat.historyLoading}
 				onRecall={(msg) => void chat.recallMessage(msg)}
+				onResend={(msg) => void chat.resendMessage(msg)}
+				onBalanceChange={(b) => {
+					balance = b;
+					void chat.refreshBalance();
+				}}
 			/>
 			<MessageInput
 				chatMode={chat.chatMode}
 				{targetUser}
 				{groupId}
 				bind:value={inputText}
+				{typingHint}
+				onTyping={emitTyping}
 				onSend={send}
 				onSendVoice={sendVoice}
+				onOpenRedPacket={() => {
+					if (
+						(chat.chatMode === 'private' && targetUser.trim()) ||
+						(chat.chatMode === 'group' && groupId.trim())
+					) {
+						redPacketOpen = true;
+					} else {
+						toastInfo(chat.chatMode === 'private' ? '请先选择好友' : '请先选择群');
+					}
+				}}
 			/>
 		</main>
 	</div>
 
 	<CallPanel {call} />
+
+	<SendRedPacketDialog
+		open={redPacketOpen}
+		chatMode={chat.chatMode}
+		{balance}
+		onClose={() => (redPacketOpen = false)}
+		onSend={async (opts) => {
+			await chat.sendRedPacket(opts);
+			balance = chat.balance;
+		}}
+	/>
+
+	{#if chat.chatMode === 'group'}
+		<Sheet.Root bind:open={membersOpen}>
+			<Sheet.Content side="right" class="w-full p-0 sm:max-w-sm">
+				<div class="flex h-full flex-col">
+					<Sheet.Header class="border-b px-4 py-3">
+						<Sheet.Title>群成员</Sheet.Title>
+						<Sheet.Description>#{chat.groupDisplayName(groupId) || groupId}</Sheet.Description>
+					</Sheet.Header>
+					<div class="min-h-0 flex-1 overflow-hidden">
+						<GroupMembersPanel
+							groupId={groupId}
+							members={chat.groupMembers}
+							myUserId={chat.myUserId}
+							unreadPeers={chat.unreadPeers}
+							onRefresh={() => chat.refreshGroupMembers()}
+							onSelectUser={(uid, name) => {
+								membersOpen = false;
+								void selectUser(uid, name);
+							}}
+						/>
+					</div>
+				</div>
+			</Sheet.Content>
+		</Sheet.Root>
+	{/if}
 </div>

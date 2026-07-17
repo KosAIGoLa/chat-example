@@ -28,6 +28,7 @@
 	import ShieldOff from '@lucide/svelte/icons/shield-off';
 	import Phone from '@lucide/svelte/icons/phone';
 	import Video from '@lucide/svelte/icons/video';
+	import { confirmDialog } from '$lib/ui/notify.svelte';
 
 	interface Props {
 		chatMode: ChatMode;
@@ -45,6 +46,8 @@
 		onlineUsers: OnlineUser[];
 		myUserId: string;
 		unreadPeers?: Record<string, boolean>;
+		unreadGroups?: Record<string, boolean>;
+		lastPreviews?: Record<string, { text: string; ts: number }>;
 		onModeChange: (mode: ChatMode) => void;
 		onJoinGroup: () => void;
 		onLeaveGroup: (g: string) => void;
@@ -81,6 +84,8 @@
 		onlineUsers,
 		myUserId,
 		unreadPeers = {},
+		unreadGroups = {},
+		lastPreviews = {},
 		onModeChange,
 		onJoinGroup,
 		onLeaveGroup,
@@ -178,11 +183,11 @@
 			<Tabs.List class="grid w-full grid-cols-2">
 				<Tabs.Trigger value="private" class="gap-1.5">
 					<Users class="size-3.5" />
-					Private
+					私聊
 				</Tabs.Trigger>
 				<Tabs.Trigger value="group" class="gap-1.5">
 					<Hash class="size-3.5" />
-					Group
+					群组
 				</Tabs.Trigger>
 			</Tabs.List>
 		</Tabs.Root>
@@ -336,9 +341,19 @@
 										></span>
 									{/if}
 								</span>
-								<span class="min-w-0 flex-1 truncate font-medium"
-									>{u.username || u.user_id}</span
-								>
+								<span class="min-w-0 flex-1">
+									<span class="flex items-center gap-1.5">
+										<span class="truncate font-medium">{u.username || u.user_id}</span>
+										{#if unreadPeers[u.user_id]}
+											<span class="bg-amber-500 size-1.5 shrink-0 rounded-full"></span>
+										{/if}
+									</span>
+									{#if lastPreviews[`private:${u.user_id}`]?.text}
+										<span class="text-muted-foreground block truncate text-[11px]">
+											{lastPreviews[`private:${u.user_id}`].text}
+										</span>
+									{/if}
+								</span>
 							</button>
 							{#if onCallUser}
 								<Button
@@ -373,8 +388,15 @@
 								size="icon-xs"
 								class="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100"
 								title="解除好友"
-								onclick={() => {
-									if (confirm(`解除与 ${u.username || u.user_id} 的好友关系？`)) {
+								onclick={async () => {
+									if (
+										await confirmDialog({
+											title: '解除好友',
+											message: `确定解除与 ${u.username || u.user_id} 的好友关系？`,
+											confirmText: '解除',
+											danger: true
+										})
+									) {
 										void onRemoveFriend(u.user_id);
 									}
 								}}
@@ -386,11 +408,14 @@
 								size="icon-xs"
 								class="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100"
 								title="拉黑"
-								onclick={() => {
+								onclick={async () => {
 									if (
-										confirm(
-											`拉黑 ${u.username || u.user_id}？将解除好友，且无法互相邀请/私聊。`
-										)
+										await confirmDialog({
+											title: '拉黑用户',
+											message: `拉黑 ${u.username || u.user_id}？将解除好友，且无法互相邀请/私聊。`,
+											confirmText: '拉黑',
+											danger: true
+										})
 									) {
 										void onBlockUser({ user_id: u.user_id });
 									}
@@ -433,8 +458,15 @@
 									size="icon-xs"
 									class="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100"
 									title="拉黑"
-									onclick={() => {
-										if (confirm(`拉黑 ${u.username || u.user_id}？`)) {
+									onclick={async () => {
+										if (
+											await confirmDialog({
+												title: '拉黑用户',
+												message: `确定拉黑 ${u.username || u.user_id}？`,
+												confirmText: '拉黑',
+												danger: true
+											})
+										) {
 											void onBlockUser({ user_id: u.user_id, username: u.username });
 										}
 									}}
@@ -488,7 +520,8 @@
 					{#each joinedGroups as g (g)}
 						<li
 							class="hover:bg-sidebar-accent group flex items-center justify-between rounded-md px-2 py-1.5
-								{groupId === g ? 'bg-sidebar-accent' : ''}"
+								{groupId === g ? 'bg-sidebar-accent' : ''}
+								{unreadGroups[g] ? 'bg-amber-500/15 ring-1 ring-amber-400/40' : ''}"
 						>
 							<button
 								type="button"
@@ -497,12 +530,24 @@
 								title={g}
 							>
 								<Hash class="text-muted-foreground size-3.5 shrink-0" />
-								<span class="min-w-0 flex-1 truncate font-medium">{groupLabel(g)}</span>
-								{#if isOwner(g)}
-									<Crown class="size-3 shrink-0 text-amber-500" title="Owner" />
-								{/if}
+								<span class="min-w-0 flex-1">
+									<span class="flex items-center gap-1.5">
+										<span class="truncate font-medium">{groupLabel(g)}</span>
+										{#if isOwner(g)}
+											<Crown class="size-3 shrink-0 text-amber-500" title="Owner" />
+										{/if}
+										{#if unreadGroups[g]}
+											<span class="bg-amber-500 size-1.5 shrink-0 rounded-full"></span>
+										{/if}
+									</span>
+									{#if lastPreviews[`group:${g}`]?.text}
+										<span class="text-muted-foreground block truncate text-[11px]">
+											{lastPreviews[`group:${g}`].text}
+										</span>
+									{/if}
+								</span>
 								{#if groupId === g}
-									<Badge variant="secondary" class="text-[10px]">active</Badge>
+									<Badge variant="secondary" class="text-[10px]">当前</Badge>
 								{/if}
 							</button>
 							{#if isOwner(g)}
@@ -510,8 +555,15 @@
 									variant="ghost"
 									size="icon-xs"
 									class="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100"
-									onclick={() => {
-										if (confirm(`解散群「${groupLabel(g)}」？所有成员将被移除。`)) {
+									onclick={async () => {
+										if (
+											await confirmDialog({
+												title: '解散群聊',
+												message: `解散群「${groupLabel(g)}」？所有成员将被移除。`,
+												confirmText: '解散',
+												danger: true
+											})
+										) {
 											void onDissolveGroup(g);
 										}
 									}}
