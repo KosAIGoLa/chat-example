@@ -717,9 +717,6 @@
 							toastInfo('已取消置顶', '置顶');
 						}).catch((err) => toastError((err as Error).message || '取消失败'));
 					}}
-					onOpenMessage={() => {
-						/* list stays in view; multi pins expand in bar */
-					}}
 				/>
 			{/if}
 
