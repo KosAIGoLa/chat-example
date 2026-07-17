@@ -20,6 +20,10 @@
 	import CircleAlert from '@lucide/svelte/icons/circle-alert';
 	import Reply from '@lucide/svelte/icons/reply';
 	import Pencil from '@lucide/svelte/icons/pencil';
+	import Megaphone from '@lucide/svelte/icons/megaphone';
+	import CheckSquare from '@lucide/svelte/icons/check-square';
+	import Square from '@lucide/svelte/icons/square';
+	import ListChecks from '@lucide/svelte/icons/list-checks';
 	import RedPacketCard from './RedPacketCard.svelte';
 	import UserAvatar from './UserAvatar.svelte';
 
@@ -32,6 +36,13 @@
 		avatarSrc?: string;
 		/** Allow reply via context menu (group chat). */
 		canReply?: boolean;
+		/** Group owner/admin: pin as announcement. */
+		canAnnounce?: boolean;
+		/** Message is already a group announcement. */
+		isAnnouncement?: boolean;
+		/** Multi-select mode for bulk pin. */
+		selectMode?: boolean;
+		selected?: boolean;
 		onRecall?: (msg: ChatMessage) => void;
 		onResend?: (msg: ChatMessage) => void;
 		onBalanceChange?: (balance: number) => void;
@@ -39,6 +50,14 @@
 		onReply?: (msg: ChatMessage) => void;
 		/** Edit own text message. */
 		onEdit?: (msg: ChatMessage, newText: string) => Promise<void> | void;
+		/** Set this message as announcement. */
+		onSetAnnouncement?: (msg: ChatMessage) => void;
+		/** Remove this message from announcements. */
+		onUnsetAnnouncement?: (msg: ChatMessage) => void;
+		/** Enter multi-select with this message. */
+		onEnterSelect?: (msg: ChatMessage) => void;
+		/** Toggle selection in multi-select mode. */
+		onToggleSelect?: (msg: ChatMessage) => void;
 	}
 
 	let {
@@ -47,11 +66,19 @@
 		fromName = '',
 		avatarSrc = '',
 		canReply = false,
+		canAnnounce = false,
+		isAnnouncement = false,
+		selectMode = false,
+		selected = false,
 		onRecall,
 		onResend,
 		onBalanceChange,
 		onReply,
-		onEdit
+		onEdit,
+		onSetAnnouncement,
+		onUnsetAnnouncement,
+		onEnterSelect,
+		onToggleSelect
 	}: Props = $props();
 
 	const own = $derived(isOwnMessage(message, myUserId));
@@ -113,13 +140,29 @@
 		menuOpen = false;
 	}
 
+	const showAnnounce = $derived(
+		canAnnounce &&
+			!!message.id &&
+			message.type === 'group' &&
+			!system &&
+			!recalled &&
+			message.send_status !== 'failed' &&
+			message.send_status !== 'sending'
+	);
+
 	function openMenu(e: MouseEvent) {
 		if (system || recalled) return;
+		if (selectMode) {
+			e.preventDefault();
+			onToggleSelect?.(message);
+			return;
+		}
 		// No actions available → skip menu
 		const hasAny =
 			showReply ||
 			showRecall ||
 			showEdit ||
+			showAnnounce ||
 			(failed && own && !!onResend);
 		if (!hasAny) return;
 		e.preventDefault();
@@ -234,10 +277,37 @@
 	</div>
 {:else}
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div
-		class={cn('group flex w-full items-end gap-1.5', own ? 'flex-row-reverse' : 'flex-row')}
+		class={cn(
+			'group flex w-full items-end gap-1.5',
+			own ? 'flex-row-reverse' : 'flex-row',
+			selectMode && selected && 'bg-primary/5 rounded-xl ring-1 ring-primary/30'
+		)}
 		oncontextmenu={openMenu}
+		onclick={selectMode
+			? () => {
+					onToggleSelect?.(message);
+				}
+			: undefined}
 	>
+		{#if selectMode}
+			<button
+				type="button"
+				class="mb-2 shrink-0 text-primary"
+				aria-label={selected ? '取消选择' : '选择'}
+				onclick={(e) => {
+					e.stopPropagation();
+					onToggleSelect?.(message);
+				}}
+			>
+				{#if selected}
+					<CheckSquare class="size-5" />
+				{:else}
+					<Square class="text-muted-foreground size-5" />
+				{/if}
+			</button>
+		{/if}
 		<div class="mb-0.5 shrink-0">
 			<UserAvatar
 				class="size-10"
@@ -267,6 +337,14 @@
 				{/if}
 				{#if message.edited && !editing}
 					<span class="opacity-60">(已编辑)</span>
+				{/if}
+				{#if isAnnouncement}
+					<span
+						class="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+					>
+						<Megaphone class="size-2.5" />
+						公告
+					</span>
 				{/if}
 			</div>
 			<div class="flex items-end gap-1">
@@ -465,6 +543,47 @@
 			>
 				<Reply class="size-3.5 opacity-70" />
 				回复
+			</button>
+		{/if}
+		{#if showAnnounce}
+			{#if isAnnouncement}
+				<button
+					type="button"
+					role="menuitem"
+					class="hover:bg-accent flex w-full items-center gap-2 px-3 py-2 text-left text-sm"
+					onclick={() => {
+						closeMenu();
+						onUnsetAnnouncement?.(message);
+					}}
+				>
+					<Megaphone class="size-3.5 opacity-70" />
+					取消公告
+				</button>
+			{:else}
+				<button
+					type="button"
+					role="menuitem"
+					class="hover:bg-accent flex w-full items-center gap-2 px-3 py-2 text-left text-sm"
+					onclick={() => {
+						closeMenu();
+						onSetAnnouncement?.(message);
+					}}
+				>
+					<Megaphone class="size-3.5 opacity-70" />
+					设为公告
+				</button>
+			{/if}
+			<button
+				type="button"
+				role="menuitem"
+				class="hover:bg-accent flex w-full items-center gap-2 px-3 py-2 text-left text-sm"
+				onclick={() => {
+					closeMenu();
+					onEnterSelect?.(message);
+				}}
+			>
+				<ListChecks class="size-3.5 opacity-70" />
+				多选设公告
 			</button>
 		{/if}
 		{#if showEdit}

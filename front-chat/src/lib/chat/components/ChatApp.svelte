@@ -7,6 +7,7 @@
 	import ChatSidebar from './ChatSidebar.svelte';
 	import GroupMembersPanel from './GroupMembersPanel.svelte';
 	import GroupSettings from './GroupSettings.svelte';
+	import GroupAnnouncementsBar from './GroupAnnouncementsBar.svelte';
 	import MessageList from './MessageList.svelte';
 	import MessageInput from './MessageInput.svelte';
 	import CallPanel from './CallPanel.svelte';
@@ -701,6 +702,57 @@
 				</div>
 			</div>
 
+			{#if chat.chatMode === 'group' && groupId.trim() && chat.groupAnnouncements.length > 0}
+				<GroupAnnouncementsBar
+					announcements={chat.groupAnnouncements}
+					canManage={!!activeGroup?.canManage}
+					onRemove={(mid) => {
+						void chat.removeAnnouncement(mid).then(() => {
+							toastInfo('已取消公告', '群公告');
+						}).catch((err) => toastError((err as Error).message || '取消失败'));
+					}}
+					onOpenMessage={() => {
+						/* list stays in view; multi announcements expand in bar */
+					}}
+				/>
+			{/if}
+
+			{#if chat.selectMode && chat.chatMode === 'group'}
+				<div
+					class="bg-primary/10 flex shrink-0 items-center gap-2 border-b px-3 py-2 md:px-4"
+				>
+					<span class="text-sm font-medium">
+						已选 {chat.selectedMsgIds.length} 条
+					</span>
+					<div class="ml-auto flex items-center gap-1.5">
+						<Button
+							variant="outline"
+							size="sm"
+							class="h-8"
+							onclick={() => chat.exitSelectMode()}
+						>
+							取消
+						</Button>
+						<Button
+							variant="default"
+							size="sm"
+							class="h-8 gap-1"
+							disabled={chat.selectedMsgIds.length === 0}
+							onclick={() => {
+								void chat
+									.setMessagesAsAnnouncement()
+									.then((n) => {
+										toastInfo(`已将 ${n.length} 条消息设为公告`, '群公告');
+									})
+									.catch((err) => toastError((err as Error).message || '设置失败'));
+							}}
+						>
+							设为公告
+						</Button>
+					</div>
+				</div>
+			{/if}
+
 			{#if chat.chatMode === 'group' && groupId.trim() && groupMeeting}
 				<div
 					class="flex shrink-0 items-center gap-3 border-b border-emerald-500/30 bg-emerald-500/10 px-4 py-2.5 md:px-6"
@@ -758,6 +810,10 @@
 					(chat.chatMode === 'group' && !!groupId.trim()) ||
 					(chat.chatMode === 'private' && !!targetUser.trim())
 				}
+				canAnnounce={chat.chatMode === 'group' && !!activeGroup?.canManage}
+				selectMode={chat.selectMode}
+				selectedMsgIds={chat.selectedMsgIds}
+				isAnnouncement={(id) => chat.isAnnouncement(id)}
 				resolveName={(uid) =>
 					uid === chat.myUserId ? displayUsername || uid : chat.displayName(uid)
 				}
@@ -806,6 +862,26 @@
 				onEdit={async (msg, text) => {
 					await chat.editMessage(msg, text);
 					toastInfo('消息已编辑', '编辑');
+				}}
+				onSetAnnouncement={(msg) => {
+					if (!msg.id) return;
+					void chat
+						.setMessagesAsAnnouncement([msg.id])
+						.then(() => toastInfo('已设为群公告', '群公告'))
+						.catch((err) => toastError((err as Error).message || '设置失败'));
+				}}
+				onUnsetAnnouncement={(msg) => {
+					if (!msg.id) return;
+					void chat
+						.removeAnnouncement(msg.id)
+						.then(() => toastInfo('已取消公告', '群公告'))
+						.catch((err) => toastError((err as Error).message || '取消失败'));
+				}}
+				onEnterSelect={(msg) => {
+					chat.enterSelectMode(msg.id);
+				}}
+				onToggleSelect={(msg) => {
+					if (msg.id) chat.toggleSelectMessage(msg.id);
 				}}
 				onLoadOlder={() => chat.loadOlderHistory()}
 			/>

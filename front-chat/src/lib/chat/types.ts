@@ -311,6 +311,30 @@ export interface GroupDissolvedEvent {
 	by_user_id?: string;
 }
 
+/** One pinned group announcement (message snapshot). */
+export interface GroupAnnouncement {
+	id: number;
+	group_id: string;
+	message_id: string;
+	content: string;
+	content_type?: string;
+	from_user_id?: string;
+	from_username?: string;
+	set_by_user_id?: string;
+	message_ts?: number;
+	created_at?: number;
+}
+
+/** WS fan-out when announcements change. */
+export interface GroupAnnouncementEvent {
+	type: 'group_announcement';
+	action: 'set' | 'remove' | 'set_bulk' | string;
+	group_id: string;
+	by_user_id?: string;
+	items?: GroupAnnouncement[];
+	message_id?: string;
+}
+
 export interface ChatUser {
 	id: number;
 	username: string;

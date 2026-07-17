@@ -35,6 +35,7 @@ func Init() *gorm.DB {
 		&model.PrivateConvCutoff{},
 		&model.Group{},
 		&model.GroupMember{},
+		&model.GroupAnnouncement{},
 		&model.OfflineMessage{},
 		&model.WalletLedger{},
 		&model.RedPacket{},

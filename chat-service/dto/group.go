@@ -54,3 +54,52 @@ type GroupMemberDTO struct {
 	// Online: true when the user has an active WebSocket connection (any instance).
 	Online bool `json:"online"`
 }
+
+// GroupAnnouncementDTO is one pinned group announcement (from a chat message).
+type GroupAnnouncementDTO struct {
+	ID           uint   `json:"id"`
+	GroupID      string `json:"group_id"`
+	MessageID    string `json:"message_id"`
+	Content      string `json:"content"`
+	ContentType  string `json:"content_type,omitempty"`
+	FromUserID   string `json:"from_user_id,omitempty"`
+	FromUsername string `json:"from_username,omitempty"`
+	SetByUserID  string `json:"set_by_user_id,omitempty"`
+	MessageTS    int64  `json:"message_ts,omitempty"`
+	CreatedAt    int64  `json:"created_at,omitempty"`
+}
+
+// AddAnnouncementRequest is POST /api/groups/:id/announcements body (single or bulk).
+type AddAnnouncementRequest struct {
+	// Single
+	MessageID    string `json:"message_id,omitempty"`
+	Content      string `json:"content,omitempty"`
+	ContentType  string `json:"content_type,omitempty"`
+	FromUserID   string `json:"from_user_id,omitempty"`
+	FromUsername string `json:"from_username,omitempty"`
+	MessageTS    int64  `json:"message_ts,omitempty"`
+	// Bulk: multiple message_ids (content snapshots in items preferred).
+	MessageIDs []string              `json:"message_ids,omitempty"`
+	Items      []AddAnnouncementItem `json:"items,omitempty"`
+}
+
+// AddAnnouncementItem is one message to pin in a bulk request.
+type AddAnnouncementItem struct {
+	MessageID    string `json:"message_id"`
+	Content      string `json:"content,omitempty"`
+	ContentType  string `json:"content_type,omitempty"`
+	FromUserID   string `json:"from_user_id,omitempty"`
+	FromUsername string `json:"from_username,omitempty"`
+	MessageTS    int64  `json:"message_ts,omitempty"`
+}
+
+// AnnouncementEvent is WS fan-out when announcements change.
+// type: "group_announcement"
+type AnnouncementEvent struct {
+	Type      string                 `json:"type"`   // "group_announcement"
+	Action    string                 `json:"action"` // "set" | "remove" | "set_bulk"
+	GroupID   string                 `json:"group_id"`
+	ByUserID  string                 `json:"by_user_id,omitempty"`
+	Items     []GroupAnnouncementDTO `json:"items,omitempty"`
+	MessageID string                 `json:"message_id,omitempty"` // remove
+}

@@ -587,6 +587,164 @@ func (s *GroupService) SetMemberRole(actorID uint, groupID string, targetUserID 
 	}, nil
 }
 
+// ListAnnouncements returns all pinned announcements for a group (newest first).
+func (s *GroupService) ListAnnouncements(groupID string) ([]dto.GroupAnnouncementDTO, error) {
+	groupID, err := validate.GroupID(groupID, true)
+	if err != nil {
+		return nil, err
+	}
+	var rows []model.GroupAnnouncement
+	if err := s.db.Where("group_id = ?", groupID).Order("created_at desc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]dto.GroupAnnouncementDTO, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toAnnouncementDTO(r))
+	}
+	return out, nil
+}
+
+// AddAnnouncements pins one or more messages as group announcements (owner/admin).
+// Duplicate message_ids are ignored (idempotent).
+func (s *GroupService) AddAnnouncements(actorID uint, groupID string, items []dto.AddAnnouncementItem) ([]dto.GroupAnnouncementDTO, error) {
+	groupID, err := validate.GroupID(groupID, true)
+	if err != nil {
+		return nil, err
+	}
+	if !s.CanManageGroup(actorID, groupID) {
+		return nil, errors.New("only owner or admin can set announcements")
+	}
+	if len(items) == 0 {
+		return nil, errors.New("no messages to pin")
+	}
+	if len(items) > 50 {
+		return nil, errors.New("too many announcements at once (max 50)")
+	}
+	var g model.Group
+	if err := s.db.Where("id = ?", groupID).First(&g).Error; err != nil {
+		return nil, errors.New("group not found")
+	}
+	setBy := strconv.FormatUint(uint64(actorID), 10)
+	out := make([]dto.GroupAnnouncementDTO, 0, len(items))
+	for _, it := range items {
+		mid := strings.TrimSpace(it.MessageID)
+		if mid == "" || len(mid) > 36 {
+			continue
+		}
+		content := strings.TrimSpace(it.Content)
+		if content == "" {
+			content = "[消息]"
+		}
+		if len(content) > 2000 {
+			content = content[:2000]
+		}
+		ct := strings.TrimSpace(it.ContentType)
+		if ct == "" {
+			ct = "text"
+		}
+		row := model.GroupAnnouncement{
+			GroupID:      groupID,
+			MessageID:    mid,
+			Content:      content,
+			ContentType:  ct,
+			FromUserID:   strings.TrimSpace(it.FromUserID),
+			FromUsername: strings.TrimSpace(it.FromUsername),
+			SetByUserID:  setBy,
+			MessageTS:    it.MessageTS,
+		}
+		// Upsert on (group_id, message_id)
+		var existing model.GroupAnnouncement
+		err := s.db.Where("group_id = ? AND message_id = ?", groupID, mid).First(&existing).Error
+		if err == nil {
+			_ = s.db.Model(&existing).Updates(map[string]interface{}{
+				"content":        row.Content,
+				"content_type":   row.ContentType,
+				"from_user_id":   row.FromUserID,
+				"from_username":  row.FromUsername,
+				"set_by_user_id": setBy,
+				"message_ts":     row.MessageTS,
+			}).Error
+			existing.Content = row.Content
+			existing.ContentType = row.ContentType
+			existing.FromUserID = row.FromUserID
+			existing.FromUsername = row.FromUsername
+			existing.SetByUserID = setBy
+			existing.MessageTS = row.MessageTS
+			out = append(out, toAnnouncementDTO(existing))
+			continue
+		}
+		if err := s.db.Create(&row).Error; err != nil {
+			continue
+		}
+		out = append(out, toAnnouncementDTO(row))
+	}
+	if len(out) == 0 {
+		return nil, errors.New("failed to pin any announcement")
+	}
+	return out, nil
+}
+
+// RemoveAnnouncement unpins a message (owner/admin).
+func (s *GroupService) RemoveAnnouncement(actorID uint, groupID, messageID string) error {
+	groupID, err := validate.GroupID(groupID, true)
+	if err != nil {
+		return err
+	}
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return errors.New("message_id required")
+	}
+	if !s.CanManageGroup(actorID, groupID) {
+		return errors.New("only owner or admin can remove announcements")
+	}
+	res := s.db.Where("group_id = ? AND message_id = ?", groupID, messageID).Delete(&model.GroupAnnouncement{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errors.New("announcement not found")
+	}
+	return nil
+}
+
+// NotifyAnnouncement pushes a WS event to group members (best-effort via hub room + durable members).
+func (s *GroupService) NotifyAnnouncement(groupID, byUserID, action string, items []dto.GroupAnnouncementDTO, messageID string) {
+	if s.hub == nil || groupID == "" {
+		return
+	}
+	ev := dto.AnnouncementEvent{
+		Type:      "group_announcement",
+		Action:    action,
+		GroupID:   groupID,
+		ByUserID:  byUserID,
+		Items:     items,
+		MessageID: messageID,
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	// Deliver once per durable member (all their tabs on this instance).
+	for _, uid := range s.MemberUserIDs(groupID) {
+		s.hub.DeliverToUser(uid, data)
+	}
+}
+
+func toAnnouncementDTO(r model.GroupAnnouncement) dto.GroupAnnouncementDTO {
+	return dto.GroupAnnouncementDTO{
+		ID:           r.ID,
+		GroupID:      r.GroupID,
+		MessageID:    r.MessageID,
+		Content:      r.Content,
+		ContentType:  r.ContentType,
+		FromUserID:   r.FromUserID,
+		FromUsername: r.FromUsername,
+		SetByUserID:  r.SetByUserID,
+		MessageTS:    r.MessageTS,
+		CreatedAt:    r.CreatedAt.Unix(),
+	}
+}
+
 // BroadcastMeetingNotice posts a system line into the group chat stream (meeting open/close).
 func (s *GroupService) BroadcastMeetingNotice(groupID, text string) {
 	if s.chatSvc == nil || strings.TrimSpace(text) == "" {

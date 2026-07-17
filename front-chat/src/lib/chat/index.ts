@@ -1,6 +1,22 @@
 /**
  * Chat UI package — WebSocket chat components and controller.
  *
+ * Layout:
+ *   components/     — Svelte UI (ChatApp, bubbles, sidebar, …)
+ *   controller/     — domain modules (chat.svelte.ts is thin orchestrator only)
+ *     ws-session    — WebSocket connect / heartbeat / sealed send
+ *     ws-dispatch   — inbound WS event routing
+ *     history       — cache-first history + scroll-up pages
+ *     messaging     — send / recall / edit / voice / red packet
+ *     typing        — typing indicators
+ *     presence      — online / unread / previews
+ *     friends       — friends / block (≠ remove)
+ *     groups        — groups / roles / announcements
+ *     meetings      — group meeting snapshots
+ *     message-helpers, normalize, joined-groups, constants
+ *   chat.svelte.ts  — orchestrator only (~900 lines, $state + wire)
+ *   call.svelte.ts  — LiveKit private call + group meeting
+ *
  * Usage:
  *   import { ChatApp } from '$lib/chat';
  *   <ChatApp />

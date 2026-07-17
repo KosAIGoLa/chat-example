@@ -269,6 +269,101 @@ func (ctrl *GroupController) UploadAvatar(c *gin.Context) {
 	})
 }
 
+// ListAnnouncements GET /api/groups/:group_id/announcements
+func (ctrl *GroupController) ListAnnouncements(c *gin.Context) {
+	groupID, err := validate.GroupID(c.Param("group_id"), true)
+	if err != nil {
+		writeValidateErr(c, err)
+		return
+	}
+	list, err := ctrl.groups.ListAnnouncements(groupID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, dto.APIResponseDTO{
+		Code: 200, Message: "success",
+		Data: gin.H{"announcements": list, "count": len(list)},
+	})
+}
+
+// AddAnnouncements POST /api/groups/:group_id/announcements
+// Body: single {message_id, content, ...} or bulk {items:[{message_id,...}]} / {message_ids:[]}
+func (ctrl *GroupController) AddAnnouncements(c *gin.Context) {
+	groupID, err := validate.GroupID(c.Param("group_id"), true)
+	if err != nil {
+		writeValidateErr(c, err)
+		return
+	}
+	var body dto.AddAnnouncementRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		writeValidateErr(c, validate.JSONBody(err))
+		return
+	}
+	items := body.Items
+	if len(items) == 0 && len(body.MessageIDs) > 0 {
+		for _, id := range body.MessageIDs {
+			items = append(items, dto.AddAnnouncementItem{MessageID: id})
+		}
+	}
+	if len(items) == 0 && strings.TrimSpace(body.MessageID) != "" {
+		items = append(items, dto.AddAnnouncementItem{
+			MessageID:    body.MessageID,
+			Content:      body.Content,
+			ContentType:  body.ContentType,
+			FromUserID:   body.FromUserID,
+			FromUsername: body.FromUsername,
+			MessageTS:    body.MessageTS,
+		})
+	}
+	me := ctrl.me(c)
+	list, err := ctrl.groups.AddAnnouncements(me, groupID, items)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "only owner") {
+			code = http.StatusForbidden
+		}
+		c.JSON(code, dto.APIResponseDTO{Code: code, Message: err.Error()})
+		return
+	}
+	by := strconv.FormatUint(uint64(me), 10)
+	action := "set"
+	if len(list) > 1 {
+		action = "set_bulk"
+	}
+	ctrl.groups.NotifyAnnouncement(groupID, by, action, list, "")
+	c.JSON(http.StatusOK, dto.APIResponseDTO{
+		Code: 200, Message: "announcement set",
+		Data: gin.H{"announcements": list, "count": len(list)},
+	})
+}
+
+// RemoveAnnouncement DELETE /api/groups/:group_id/announcements/:message_id
+func (ctrl *GroupController) RemoveAnnouncement(c *gin.Context) {
+	groupID, err := validate.GroupID(c.Param("group_id"), true)
+	if err != nil {
+		writeValidateErr(c, err)
+		return
+	}
+	messageID := strings.TrimSpace(c.Param("message_id"))
+	if messageID == "" {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "message_id required"})
+		return
+	}
+	me := ctrl.me(c)
+	if err := ctrl.groups.RemoveAnnouncement(me, groupID, messageID); err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "only owner") {
+			code = http.StatusForbidden
+		}
+		c.JSON(code, dto.APIResponseDTO{Code: code, Message: err.Error()})
+		return
+	}
+	by := strconv.FormatUint(uint64(me), 10)
+	ctrl.groups.NotifyAnnouncement(groupID, by, "remove", nil, messageID)
+	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "announcement removed"})
+}
+
 // GetAvatar GET /api/group-avatar/:group_id — public image for <img src>.
 func (ctrl *GroupController) GetAvatar(c *gin.Context) {
 	if ctrl.media == nil {

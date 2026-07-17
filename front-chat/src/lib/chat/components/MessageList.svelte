@@ -17,6 +17,10 @@
 		hasMore?: boolean;
 		/** Enable reply action on group messages. */
 		canReply?: boolean;
+		canAnnounce?: boolean;
+		selectMode?: boolean;
+		selectedMsgIds?: string[];
+		isAnnouncement?: (messageId: string | undefined) => boolean;
 		/** Resolve user id → display name for avatars. */
 		resolveName?: (userId: string) => string;
 		/** Resolve user id → avatar image URL. */
@@ -28,6 +32,10 @@
 		onReply?: (msg: ChatMessage) => void;
 		/** Edit own text message. */
 		onEdit?: (msg: ChatMessage, newText: string) => Promise<void> | void;
+		onSetAnnouncement?: (msg: ChatMessage) => void;
+		onUnsetAnnouncement?: (msg: ChatMessage) => void;
+		onEnterSelect?: (msg: ChatMessage) => void;
+		onToggleSelect?: (msg: ChatMessage) => void;
 		/** Scroll to top → load older history. Returns # of new messages. */
 		onLoadOlder?: () => Promise<number>;
 	}
@@ -39,6 +47,10 @@
 		loadingOlder = false,
 		hasMore = false,
 		canReply = false,
+		canAnnounce = false,
+		selectMode = false,
+		selectedMsgIds = [],
+		isAnnouncement,
 		resolveName,
 		resolveAvatar,
 		onRecall,
@@ -46,6 +58,10 @@
 		onBalanceChange,
 		onReply,
 		onEdit,
+		onSetAnnouncement,
+		onUnsetAnnouncement,
+		onEnterSelect,
+		onToggleSelect,
 		onLoadOlder
 	}: Props = $props();
 
@@ -172,10 +188,18 @@
 						fromName={resolveName?.(msg.from) || msg.from}
 						avatarSrc={resolveAvatar?.(msg.from) || ''}
 						{canReply}
+						{canAnnounce}
+						isAnnouncement={!!msg.id && !!isAnnouncement?.(msg.id)}
+						{selectMode}
+						selected={!!msg.id && selectedMsgIds.includes(msg.id)}
 						{onRecall}
 						{onResend}
 						{onBalanceChange}
 						{onReply}
+						{onSetAnnouncement}
+						{onUnsetAnnouncement}
+						{onEnterSelect}
+						{onToggleSelect}
 						{onEdit}
 					/>
 				{/each}

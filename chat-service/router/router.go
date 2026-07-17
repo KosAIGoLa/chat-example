@@ -52,6 +52,10 @@ func SetupRouter(
 		api.POST("/groups/:group_id/dissolve", groupCtrl.Dissolve)
 		api.POST("/groups/:group_id/avatar", groupCtrl.UploadAvatar)
 		api.PATCH("/groups/:group_id/members/:user_id", groupCtrl.SetMemberRole)
+		// Group announcements (multiple pinned messages; owner/admin manage)
+		api.GET("/groups/:group_id/announcements", groupCtrl.ListAnnouncements)
+		api.POST("/groups/:group_id/announcements", groupCtrl.AddAnnouncements)
+		api.DELETE("/groups/:group_id/announcements/:message_id", groupCtrl.RemoveAnnouncement)
 
 		api.POST("/groups/join", chatCtrl.JoinGroup)
 		api.POST("/groups/leave", chatCtrl.LeaveGroup)

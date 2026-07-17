@@ -1,4 +1,9 @@
-import type { GroupInfo, GroupMember, GroupMembersResponse } from '$lib/chat/types';
+import type {
+	GroupAnnouncement,
+	GroupInfo,
+	GroupMember,
+	GroupMembersResponse
+} from '$lib/chat/types';
 import { request, requestForm } from './client';
 
 /** Durable group create / join / leave / dissolve REST API. */
@@ -88,6 +93,53 @@ export const groupService = {
 		const form = new FormData();
 		form.append('file', file);
 		return requestForm(`/api/groups/${encodeURIComponent(groupId)}/avatar`, form);
+	},
+
+	/** List group announcements. */
+	listAnnouncements(
+		groupId: string
+	): Promise<{ announcements: GroupAnnouncement[]; count: number }> {
+		return request(`/api/groups/${encodeURIComponent(groupId)}/announcements`);
+	},
+
+	/**
+	 * Owner/admin: pin one or more messages as announcements.
+	 * Prefer `items` with content snapshots for durable display.
+	 */
+	addAnnouncements(
+		groupId: string,
+		body:
+			| {
+					items: Array<{
+						message_id: string;
+						content?: string;
+						content_type?: string;
+						from_user_id?: string;
+						from_username?: string;
+						message_ts?: number;
+					}>;
+			  }
+			| {
+					message_id: string;
+					content?: string;
+					content_type?: string;
+					from_user_id?: string;
+					from_username?: string;
+					message_ts?: number;
+			  }
+	): Promise<{ announcements: GroupAnnouncement[]; count: number }> {
+		return request(`/api/groups/${encodeURIComponent(groupId)}/announcements`, {
+			method: 'POST',
+			body: JSON.stringify(body)
+		});
+	},
+
+	/** Owner/admin: remove one announcement by message id. */
+	removeAnnouncement(groupId: string, messageId: string): Promise<unknown> {
+		return request(
+			`/api/groups/${encodeURIComponent(groupId)}/announcements/${encodeURIComponent(messageId)}`,
+			{ method: 'DELETE' }
+		);
 	}
 };
 
