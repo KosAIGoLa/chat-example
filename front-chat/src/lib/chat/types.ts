@@ -145,10 +145,13 @@ export interface BlacklistUser {
 	created_at: number;
 }
 
-/** audio = 语音通话, video = 视讯通话 */
+/** audio = 语音通话 / 语音会议, video = 视讯通话 / 视讯会议 */
 export type CallMedia = 'audio' | 'video';
 
-/** WebRTC call signaling over chat WebSocket (media is LiveKit). */
+/**
+ * Private 1:1 call signaling over chat WebSocket (media is LiveKit).
+ * Ring / accept / reject — NOT used for group conferences.
+ */
 export interface CallEvent {
 	type: 'call';
 	action: 'invite' | 'accept' | 'reject' | 'end' | 'cancel' | string;
@@ -161,6 +164,34 @@ export interface CallEvent {
 	to?: string;
 	group_id?: string;
 	timestamp?: number;
+}
+
+/**
+ * Group conference lifecycle (meeting mode).
+ * Open meeting → members join freely → leave alone or end for all.
+ * Distinct from private CallEvent ring flow.
+ */
+export interface MeetingEvent {
+	type: 'meeting';
+	action: 'started' | 'ended' | 'joined' | 'left' | string;
+	room: string;
+	media?: CallMedia | string;
+	from: string;
+	from_name?: string;
+	group_id: string;
+	participant_count?: number;
+	timestamp?: number;
+}
+
+/** Client-side snapshot of an open group meeting. */
+export interface ActiveGroupMeeting {
+	group_id: string;
+	room: string;
+	media: CallMedia;
+	started_by: string;
+	started_by_name: string;
+	started_at: number;
+	participant_count: number;
 }
 
 /**

@@ -11,6 +11,7 @@ export interface LiveKitTokenResponse {
 	call_type: CallType;
 	peer_id?: string;
 	group_id?: string;
+	media?: CallMedia | string;
 }
 
 export interface CallSignalPayload {
@@ -24,9 +25,27 @@ export interface CallSignalPayload {
 	from_name?: string;
 }
 
-/** LiveKit token + call signaling REST API. */
+/** Group meeting snapshot from GET/POST /api/livekit/meeting. */
+export interface MeetingStatus {
+	active: boolean;
+	group_id?: string;
+	room?: string;
+	media?: CallMedia | string;
+	started_by?: string;
+	started_by_name?: string;
+	started_at?: number;
+	participant_count: number;
+	/** Present after start/join. */
+	token?: string;
+	url?: string;
+	identity?: string;
+	created?: boolean;
+	ended?: boolean;
+}
+
+/** LiveKit token + private call signal + group meeting REST API. */
 export const livekitService = {
-	/** Mint a room token (private friend call or group meeting). */
+	/** Mint a room token (private friend call; group prefers meeting API). */
 	createToken(body: {
 		type: CallType;
 		peer_id?: string;
@@ -39,11 +58,31 @@ export const livekitService = {
 		});
 	},
 
-	/** Relay invite / accept / reject / end over the chat WebSocket hub. */
+	/** Relay private invite / accept / reject / end over the chat WebSocket hub. */
 	signal(body: CallSignalPayload): Promise<unknown> {
 		return request('/api/livekit/signal', {
 			method: 'POST',
 			body: JSON.stringify(body)
 		});
+	},
+
+	/**
+	 * Group conference mode (not a private ring-call):
+	 * start | join | leave | end
+	 */
+	meeting(body: {
+		group_id: string;
+		action: 'start' | 'join' | 'leave' | 'end';
+		media?: CallMedia;
+	}): Promise<MeetingStatus> {
+		return request<MeetingStatus>('/api/livekit/meeting', {
+			method: 'POST',
+			body: JSON.stringify(body)
+		});
+	},
+
+	/** Whether a group currently has an open meeting. */
+	getMeeting(groupId: string): Promise<MeetingStatus> {
+		return request<MeetingStatus>(`/api/livekit/meeting/${encodeURIComponent(groupId)}`);
 	}
 };

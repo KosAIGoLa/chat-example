@@ -39,6 +39,7 @@
 			window.location.href = '/login';
 		},
 		onCallEvent: (ev) => call.handleCallEvent(ev),
+		onMeetingEvent: (ev) => call.handleMeetingEvent(ev),
 		onBalanceChange: (b) => {
 			balance = b;
 		}
@@ -56,6 +57,33 @@
 	// Keep header balance in sync with controller.
 	$effect(() => {
 		balance = chat.balance;
+	});
+
+	// After leaving a group meeting, refresh open-meeting banner for this group.
+	let prevCallPhase = $state(call.phase);
+	$effect(() => {
+		const phase = call.phase;
+		const prev = prevCallPhase;
+		prevCallPhase = phase;
+		if (
+			(prev === 'connected' || prev === 'connecting') &&
+			(phase === 'idle' || phase === 'ended') &&
+			groupId.trim()
+		) {
+			void chat.refreshGroupMeeting(groupId.trim());
+		}
+	});
+
+	// Poll open meeting while viewing a group so "加入会议" appears even if WS was missed.
+	$effect(() => {
+		const gid = groupId.trim();
+		const mode = chat.chatMode;
+		if (mode !== 'group' || !gid) return;
+		void chat.refreshGroupMeeting(gid);
+		const t = setInterval(() => {
+			void chat.refreshGroupMeeting(gid);
+		}, 4000);
+		return () => clearInterval(t);
 	});
 
 	const conversationTitle = $derived(
@@ -135,7 +163,18 @@
 		chat.reconnectNow();
 	}
 
-	/** media: audio = 语音, video = 视讯 */
+	/** Active open meeting for the selected group (if any). */
+	const groupMeeting = $derived(
+		groupId.trim() ? chat.activeMeetings[groupId.trim()] : undefined
+	);
+	const inThisGroupMeeting = $derived(
+		call.phase !== 'idle' &&
+			call.callType === 'group' &&
+			!!groupId.trim() &&
+			call.groupId === groupId.trim()
+	);
+
+	/** Private 1:1 ring call. */
 	async function startCall(
 		media: 'audio' | 'video' = 'audio',
 		peerId?: string,
@@ -144,20 +183,89 @@
 		if (callBusy || call.phase !== 'idle') return;
 		callBusy = true;
 		try {
-			// Explicit peer (e.g. friend-list phone icon) or current conversation.
 			const to = (peerId ?? targetUser).trim();
 			if (peerId || (chat.chatMode === 'private' && to)) {
 				if (peerId && peerId !== targetUser) {
 					await selectUser(peerId, peerName);
 				}
 				await call.startPrivateCall(to, peerName || chat.displayName(to), media);
-			} else if (chat.chatMode === 'group' && groupId.trim()) {
-				await call.startGroupMeeting(groupId.trim(), media);
 			} else {
-				toastInfo(chat.chatMode === 'private' ? '请先选择好友' : '请先选择群');
+				toastInfo('请先选择好友');
 			}
 		} catch (err) {
 			toastError((err as Error).message || '发起通话失败');
+		} finally {
+			callBusy = false;
+		}
+	}
+
+	/**
+	 * Group conference (meeting mode): open a new meeting, or join if already open.
+	 * Not a private ring-call — members enter freely and can keep chatting.
+	 */
+	async function startOrJoinMeeting(media: 'audio' | 'video' = 'audio') {
+		if (callBusy || call.phase !== 'idle') return;
+		const gid = groupId.trim();
+		if (!gid) {
+			toastInfo('请先选择群');
+			return;
+		}
+		callBusy = true;
+		try {
+			const existing = chat.activeMeetings[gid];
+			if (existing) {
+				await call.joinGroupMeeting(gid);
+			} else {
+				await call.startGroupMeeting(gid, media);
+			}
+			// Prefer server snapshot; fall back to optimistic mark.
+			await chat.refreshGroupMeeting(gid);
+			if (!chat.activeMeetings[gid]) {
+				chat.setActiveMeeting(gid, {
+					group_id: gid,
+					room: call.roomName || `grp_${gid}`,
+					media: call.mediaMode === 'video' ? 'video' : 'audio',
+					started_by: userId,
+					started_by_name: displayUsername || userId,
+					started_at: Math.floor(Date.now() / 1000),
+					participant_count: 1
+				});
+			}
+		} catch (err) {
+			toastError((err as Error).message || '会议操作失败');
+		} finally {
+			callBusy = false;
+		}
+	}
+
+	async function joinOpenMeeting() {
+		if (callBusy || call.phase !== 'idle') return;
+		const gid = groupId.trim();
+		if (!gid) return;
+		callBusy = true;
+		try {
+			// Prefer join; if server has no meeting yet, start with known media.
+			try {
+				await call.joinGroupMeeting(gid);
+			} catch {
+				const media = groupMeeting?.media === 'video' ? 'video' : 'audio';
+				await call.startGroupMeeting(gid, media);
+			}
+			await chat.refreshGroupMeeting(gid);
+			if (!chat.activeMeetings[gid]) {
+				chat.setActiveMeeting(gid, {
+					group_id: gid,
+					room: call.roomName || `grp_${gid}`,
+					media: call.mediaMode === 'video' ? 'video' : 'audio',
+					started_by: userId,
+					started_by_name: displayUsername || userId,
+					started_at: Math.floor(Date.now() / 1000),
+					participant_count: 1
+				});
+			}
+			toastInfo('已加入群会议', '会议');
+		} catch (err) {
+			toastError((err as Error).message || '加入会议失败');
 		} finally {
 			callBusy = false;
 		}
@@ -305,28 +413,61 @@
 							<span class="hidden sm:inline">视讯</span>
 						</Button>
 					{:else if chat.chatMode === 'group' && groupId.trim()}
-						<Button
-							variant="outline"
-							size="sm"
-							class="h-8 gap-1.5 px-2.5"
-							disabled={callBusy || call.phase !== 'idle'}
-							onclick={() => void startCall('audio')}
-							title="群语音会议"
-						>
-							<Phone class="size-4" />
-							<span class="hidden sm:inline">语音</span>
-						</Button>
-						<Button
-							variant="default"
-							size="sm"
-							class="h-8 gap-1.5 px-2.5"
-							disabled={callBusy || call.phase !== 'idle'}
-							onclick={() => void startCall('video')}
-							title="群视讯会议"
-						>
-							<Video class="size-4" />
-							<span class="hidden sm:inline">视讯</span>
-						</Button>
+						{#if inThisGroupMeeting}
+							<Badge
+								variant="default"
+								class="h-8 gap-1 border-emerald-500/40 bg-emerald-500/15 font-normal text-emerald-700 dark:text-emerald-300"
+							>
+								{#if call.mediaMode === 'video'}
+									<Video class="size-3.5" />
+								{:else}
+									<Phone class="size-3.5" />
+								{/if}
+								会议中
+							</Badge>
+						{:else if groupMeeting}
+							<!-- Meeting already open: primary action is JOIN -->
+							<Button
+								variant="default"
+								size="sm"
+								class="h-8 gap-1.5 px-2.5 bg-emerald-600 hover:bg-emerald-600/90"
+								disabled={callBusy || call.phase !== 'idle'}
+								onclick={() => void joinOpenMeeting()}
+								title="加入进行中的群会议"
+							>
+								{#if groupMeeting.media === 'video'}
+									<Video class="size-4" />
+									<span class="hidden sm:inline">加入视讯</span>
+								{:else}
+									<Phone class="size-4" />
+									<span class="hidden sm:inline">加入语音</span>
+								{/if}
+							</Button>
+						{:else}
+							<!-- No meeting yet: open audio or video conference -->
+							<Button
+								variant="outline"
+								size="sm"
+								class="h-8 gap-1.5 px-2.5"
+								disabled={callBusy || call.phase !== 'idle'}
+								onclick={() => void startOrJoinMeeting('audio')}
+								title="开启群语音会议；若已有会议则直接加入"
+							>
+								<Phone class="size-4" />
+								<span class="hidden sm:inline">语音会议</span>
+							</Button>
+							<Button
+								variant="default"
+								size="sm"
+								class="h-8 gap-1.5 px-2.5"
+								disabled={callBusy || call.phase !== 'idle'}
+								onclick={() => void startOrJoinMeeting('video')}
+								title="开启群视讯会议；若已有会议则直接加入"
+							>
+								<Video class="size-4" />
+								<span class="hidden sm:inline">视讯会议</span>
+							</Button>
+						{/if}
 						<Button
 							variant="ghost"
 							size="sm"
@@ -347,6 +488,53 @@
 					{/if}
 				</div>
 			</div>
+
+			{#if chat.chatMode === 'group' && groupId.trim() && groupMeeting}
+				<div
+					class="flex shrink-0 items-center gap-3 border-b border-emerald-500/30 bg-emerald-500/10 px-4 py-2.5 md:px-6"
+				>
+					<div
+						class="flex size-9 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-700 dark:text-emerald-300"
+					>
+						{#if groupMeeting.media === 'video'}
+							<Video class="size-5" />
+						{:else}
+							<Phone class="size-5" />
+						{/if}
+					</div>
+					<div class="min-w-0 flex-1">
+						<p class="truncate text-sm font-semibold text-emerald-800 dark:text-emerald-200">
+							{#if inThisGroupMeeting}
+								你已在{groupMeeting.media === 'video' ? '视讯' : '语音'}会议中
+							{:else}
+								群{groupMeeting.media === 'video' ? '视讯' : '语音'}会议进行中 — 点击加入
+							{/if}
+						</p>
+						<p class="text-muted-foreground truncate text-[11px]">
+							{groupMeeting.started_by_name || groupMeeting.started_by || '成员'} 发起 ·
+							{groupMeeting.participant_count || 1} 人在会 · 也可继续发文字/语音消息
+						</p>
+					</div>
+					{#if inThisGroupMeeting}
+						<Badge variant="secondary" class="shrink-0 font-normal">已加入</Badge>
+					{:else}
+						<Button
+							size="default"
+							class="h-9 shrink-0 gap-1.5 bg-emerald-600 px-4 font-medium hover:bg-emerald-600/90"
+							disabled={callBusy || call.phase !== 'idle'}
+							onclick={() => void joinOpenMeeting()}
+						>
+							{#if groupMeeting.media === 'video'}
+								<Video class="size-4" />
+								加入视讯会议
+							{:else}
+								<Phone class="size-4" />
+								加入语音会议
+							{/if}
+						</Button>
+					{/if}
+				</div>
+			{/if}
 
 			<MessageList
 				messages={chat.messages}

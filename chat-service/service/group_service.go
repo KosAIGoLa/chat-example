@@ -272,6 +272,14 @@ func (s *GroupService) toDTO(g *model.Group, role string, count int) *dto.GroupD
 	}
 }
 
+// BroadcastMeetingNotice posts a system line into the group chat stream (meeting open/close).
+func (s *GroupService) BroadcastMeetingNotice(groupID, text string) {
+	if s.chatSvc == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	s.chatSvc.BroadcastPlainGroupNotice(groupID, text)
+}
+
 // NotifyDissolved kicks hub members and pushes group_dissolved events.
 func (s *GroupService) NotifyDissolved(groupID, name, byUserID string, memberIDs []string) {
 	if s.hub == nil {

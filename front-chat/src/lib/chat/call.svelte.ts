@@ -1,16 +1,23 @@
 /**
- * LiveKit call session controller (Svelte 5 runes).
+ * LiveKit session controller (Svelte 5 runes).
  *
- * Flow (private):
+ * Two distinct modes:
+ *
+ * Private 1:1 call (ring):
  *  1) Caller: token → signal invite → join room → ringback
- *  2) Callee: WS invite → ringtone → accept → token(same room) → join → both connected
+ *  2) Callee: WS invite → ringtone → accept → token(same room) → join
  *  3) Hangup: signal end/cancel first, then leave room once
+ *
+ * Group conference (meeting mode — NOT a ring call):
+ *  1) Host: POST meeting/start → join LiveKit → members see "会议进行中"
+ *  2) Member: POST meeting/join → enter room (no accept/reject ring)
+ *  3) Leave: only self leaves; meeting ends when last person leaves or host ends
  *
  * Fixes "Client initiated disconnect" / DUPLICATE_IDENTITY:
  *  - single in-flight connect (connectGen)
  *  - never disconnect twice
  *  - Disconnected handler does not call disconnect again
- *  - unique room name per call session
+ *  - unique room name per private call session
  */
 
 import {
@@ -22,8 +29,13 @@ import {
 	type RemoteTrack,
 	type RemoteTrackPublication
 } from 'livekit-client';
-import { livekitService, type CallType, type LiveKitTokenResponse } from '$lib/api';
-import type { CallEvent, CallMedia } from './types';
+import {
+	livekitService,
+	type CallType,
+	type LiveKitTokenResponse,
+	type MeetingStatus
+} from '$lib/api';
+import type { CallEvent, CallMedia, MeetingEvent } from './types';
 import {
 	playConnectTone,
 	playEndTone,
@@ -427,35 +439,56 @@ export function createCallController(opts: {
 		}
 	}
 
-	/** Start group meeting. media: audio | video */
-	async function startGroupMeeting(gid: string, media: CallMedia = 'video') {
+	function meetingStatusToToken(st: MeetingStatus): LiveKitTokenResponse {
+		return {
+			token: st.token || '',
+			url: st.url || '',
+			room: st.room || '',
+			identity: st.identity || opts.userId,
+			call_type: 'group',
+			group_id: st.group_id,
+			media: st.media
+		};
+	}
+
+	/**
+	 * Open a group conference (meeting mode).
+	 * Does NOT ring members — they see "会议进行中" and join freely.
+	 * If a meeting is already open, this joins it.
+	 */
+	async function startGroupMeeting(gid: string, media: CallMedia = 'audio') {
 		if (busy || phase !== 'idle') throw new Error('Already in a call');
 		busy = true;
 		leaving = false;
 		groupId = gid;
 		callType = 'group';
-		mediaMode = media === 'audio' ? 'audio' : 'video';
-		phase = 'outgoing';
+		mediaMode = media === 'video' ? 'video' : 'audio';
+		phase = 'connecting';
 		error = '';
 		const gen = ++connectGen;
 
 		try {
-			const tok = await livekitService.createToken({ type: 'group', group_id: gid });
-			if (gen !== connectGen) return;
-			roomName = tok.room;
-			await livekitService.signal({
-				action: 'invite',
-				room: tok.room,
-				call_type: 'group',
-				media: mediaMode,
+			const st = await livekitService.meeting({
 				group_id: gid,
-				from_name: opts.username
+				action: 'start',
+				media: mediaMode
 			});
 			if (gen !== connectGen) return;
+			if (!st.token || !st.url || !st.room) {
+				throw new Error('会议 token 无效');
+			}
+			// Existing meeting may be audio while we requested video — follow server media.
+			mediaMode = st.media === 'video' ? 'video' : 'audio';
+			roomName = st.room;
+			const tok = meetingStatusToToken(st);
 			await connectWithToken(tok, gen);
+			if (gen === connectGen) {
+				void playConnectTone();
+				phase = 'connected';
+			}
 		} catch (e) {
 			if (gen === connectGen) {
-				error = (e as Error).message || 'Meeting failed';
+				error = (e as Error).message || '开启会议失败';
 				stopCallSounds();
 				cleanupMedia();
 				reset();
@@ -466,10 +499,50 @@ export function createCallController(opts: {
 		}
 	}
 
+	/** Join an already-open group meeting (no ring / accept). */
+	async function joinGroupMeeting(gid: string) {
+		if (busy || phase !== 'idle') throw new Error('Already in a call');
+		busy = true;
+		leaving = false;
+		groupId = gid;
+		callType = 'group';
+		phase = 'connecting';
+		error = '';
+		const gen = ++connectGen;
+
+		try {
+			const st = await livekitService.meeting({ group_id: gid, action: 'join' });
+			if (gen !== connectGen) return;
+			if (!st.token || !st.url || !st.room) {
+				throw new Error('加入会议失败：无 token');
+			}
+			mediaMode = st.media === 'video' ? 'video' : 'audio';
+			roomName = st.room;
+			await connectWithToken(meetingStatusToToken(st), gen);
+			if (gen === connectGen) {
+				void playConnectTone();
+				phase = 'connected';
+			}
+		} catch (e) {
+			if (gen === connectGen) {
+				error = (e as Error).message || '加入会议失败';
+				stopCallSounds();
+				cleanupMedia();
+				reset();
+			}
+			throw e;
+		} finally {
+			if (gen === connectGen) busy = false;
+		}
+	}
+
+	/** Private ring only — group never uses ringtone invite. */
 	function onIncoming(ev: CallEvent) {
+		// Legacy group invite signals are ignored (meeting mode uses MeetingEvent).
+		if (ev.call_type === 'group') return;
+
 		if (phase !== 'idle') {
-			// Busy: reject private invite.
-			if (ev.call_type === 'private' && ev.from) {
+			if (ev.from) {
 				void livekitService
 					.signal({
 						action: 'reject',
@@ -483,29 +556,29 @@ export function createCallController(opts: {
 			return;
 		}
 		phase = 'incoming';
-		callType = ev.call_type === 'group' ? 'group' : 'private';
+		callType = 'private';
 		mediaMode = ev.media === 'video' ? 'video' : 'audio';
 		roomName = ev.room;
 		peerId = ev.from;
 		peerName = ev.from_name || ev.from;
-		groupId = ev.group_id || '';
+		groupId = '';
 		error = '';
 		void startRingtone();
 	}
 
 	async function acceptIncoming() {
-		if (phase !== 'incoming' || !roomName || busy) return;
+		if (phase !== 'incoming' || !roomName || busy || callType !== 'private') return;
 		busy = true;
 		const gen = ++connectGen;
 		stopCallSounds();
 		try {
-			const body =
-				callType === 'group'
-					? { type: 'group' as const, group_id: groupId, room: roomName }
-					: { type: 'private' as const, peer_id: peerId, room: roomName };
-			const tok = await livekitService.createToken(body);
+			const tok = await livekitService.createToken({
+				type: 'private',
+				peer_id: peerId,
+				room: roomName
+			});
 			if (gen !== connectGen) return;
-			if (callType === 'private' && peerId) {
+			if (peerId) {
 				await livekitService.signal({
 					action: 'accept',
 					room: roomName,
@@ -519,7 +592,6 @@ export function createCallController(opts: {
 			await connectWithToken(tok, gen);
 			if (gen === connectGen) {
 				void playConnectTone();
-				// Accept path always ends connected (peer/caller already in room or joining).
 				phase = 'connected';
 			}
 		} catch (e) {
@@ -539,10 +611,9 @@ export function createCallController(opts: {
 		stopCallSounds();
 		const r = roomName;
 		const p = peerId;
-		const t = callType;
 		reset();
 		try {
-			if (t === 'private' && p) {
+			if (p) {
 				await livekitService.signal({
 					action: 'reject',
 					room: r,
@@ -578,6 +649,11 @@ export function createCallController(opts: {
 		}, 1200);
 	}
 
+	/**
+	 * Hang up / leave.
+	 * - Private: cancel/end signals the peer (call ends for both).
+	 * - Group meeting: only leave yourself (others stay in the conference).
+	 */
 	async function hangup() {
 		if (phase === 'idle' || leaving) return;
 		leaving = true;
@@ -591,10 +667,13 @@ export function createCallController(opts: {
 		stopCallSounds();
 		void playEndTone();
 
-		// Signal peer BEFORE tearing down media.
+		// Signal BEFORE tearing down media.
 		try {
-			if (prevPhase === 'incoming') {
-				if (prevType === 'private' && prevPeer) {
+			if (prevType === 'group' && prevGroup) {
+				// Meeting leave — does not kick others.
+				await livekitService.meeting({ group_id: prevGroup, action: 'leave' });
+			} else if (prevPhase === 'incoming') {
+				if (prevPeer) {
 					await livekitService.signal({
 						action: 'reject',
 						room: prevRoom,
@@ -607,19 +686,13 @@ export function createCallController(opts: {
 				prevPhase === 'connected' ||
 				prevPhase === 'connecting'
 			) {
-				if (prevType === 'private' && prevPeer) {
+				if (prevPeer) {
 					await livekitService.signal({
-						action: prevPhase === 'outgoing' || prevPhase === 'connecting' ? 'cancel' : 'end',
+						action:
+							prevPhase === 'outgoing' || prevPhase === 'connecting' ? 'cancel' : 'end',
 						room: prevRoom,
 						call_type: 'private',
 						to: prevPeer
-					});
-				} else if (prevType === 'group' && prevGroup) {
-					await livekitService.signal({
-						action: 'end',
-						room: prevRoom,
-						call_type: 'group',
-						group_id: prevGroup
 					});
 				}
 			}
@@ -631,32 +704,62 @@ export function createCallController(opts: {
 		reset();
 	}
 
-	/** Handle remote call signaling from chat WS. */
+	/** Force-end group meeting for everyone (host / any member). */
+	async function endGroupMeeting() {
+		if (callType !== 'group' || !groupId || leaving) return;
+		leaving = true;
+		const gid = groupId;
+		connectGen++;
+		stopCallSounds();
+		void playEndTone();
+		try {
+			await livekitService.meeting({ group_id: gid, action: 'end' });
+		} catch {
+			// ignore
+		}
+		cleanupMedia({ disconnect: true });
+		reset();
+	}
+
+	/** Handle remote private call signaling from chat WS. */
 	function handleCallEvent(ev: CallEvent) {
 		if (!ev || ev.type !== 'call') return;
-		// Ignore own echoes.
 		if (ev.from === opts.userId) return;
+		// Group ring invites are obsolete — meeting mode only.
+		if (ev.call_type === 'group') return;
 
 		switch (ev.action) {
 			case 'invite':
 				onIncoming(ev);
 				break;
 			case 'accept':
-				// Callee accepted — media join is the source of truth (ParticipantConnected).
-				// Do NOT hang up or reconnect here.
 				console.info('[call] peer accepted', ev.room);
 				break;
 			case 'reject':
 			case 'cancel':
 			case 'end':
-				// Ignore signals for other rooms / stale invites.
 				if (roomName && ev.room && roomName !== ev.room) return;
 				if (phase === 'idle' || phase === 'ended') return;
+				if (callType !== 'private') return;
 				void endLocal(ev.action);
 				break;
 			default:
 				break;
 		}
+	}
+
+	/**
+	 * Group meeting lifecycle from WS.
+	 * When meeting is ended by someone else, leave media if we are in that room.
+	 */
+	function handleMeetingEvent(ev: MeetingEvent) {
+		if (!ev || ev.type !== 'meeting') return;
+		if (ev.from === opts.userId) return;
+		if (ev.action !== 'ended') return;
+		if (callType !== 'group') return;
+		if (groupId && ev.group_id && groupId !== ev.group_id) return;
+		if (phase === 'idle' || phase === 'ended') return;
+		void endLocal('end');
 	}
 
 	function setLocalVideoEl(el: HTMLVideoElement | null) {
@@ -756,10 +859,13 @@ export function createCallController(opts: {
 		},
 		startPrivateCall,
 		startGroupMeeting,
+		joinGroupMeeting,
 		acceptIncoming,
 		rejectIncoming,
 		hangup,
+		endGroupMeeting,
 		handleCallEvent,
+		handleMeetingEvent,
 		setLocalVideoEl,
 		setRemoteVideoEl,
 		toggleMic,

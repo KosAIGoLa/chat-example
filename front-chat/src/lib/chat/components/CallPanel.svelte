@@ -8,6 +8,7 @@
 	import Video from '@lucide/svelte/icons/video';
 	import VideoOff from '@lucide/svelte/icons/video-off';
 	import Users from '@lucide/svelte/icons/users';
+	import LogOut from '@lucide/svelte/icons/log-out';
 
 	interface Props {
 		call: CallController;
@@ -19,10 +20,11 @@
 	let remoteVideoEls = $state<Record<string, HTMLVideoElement | undefined>>({});
 
 	const isVideo = $derived(call.isVideo);
+	const isMeeting = $derived(call.callType === 'group');
 	const kindLabel = $derived(isVideo ? '视讯' : '语音');
 
 	const title = $derived(
-		call.callType === 'group'
+		isMeeting
 			? `${kindLabel}会议 · ${call.groupId || call.roomName}`
 			: `${kindLabel}通话 · ${call.peerName || call.peerId}`
 	);
@@ -35,13 +37,21 @@
 			: call.phase === 'incoming'
 				? `${kindLabel}来电…`
 				: call.phase === 'connecting'
-					? '正在连接媒体…'
+					? isMeeting
+						? '正在进入会议…'
+						: '正在连接媒体…'
 					: call.phase === 'connected'
-						? isVideo
-							? '视讯通话中'
-							: '语音通话中'
+						? isMeeting
+							? isVideo
+								? '视讯会议中 · 可继续群聊'
+								: '语音会议中 · 可继续群聊'
+							: isVideo
+								? '视讯通话中'
+								: '语音通话中'
 						: call.phase === 'ended'
-							? '通话已结束'
+							? isMeeting
+								? '已离开会议'
+								: '通话已结束'
 							: ''
 	);
 
@@ -75,7 +85,7 @@
 					<p class="text-destructive mt-1 text-xs">{call.error}</p>
 				{/if}
 			</div>
-			{#if call.callType === 'group'}
+			{#if isMeeting}
 				<span class="text-muted-foreground inline-flex items-center gap-1 text-xs">
 					<Users class="size-3.5" />
 					{call.participants.length + 1}
@@ -84,6 +94,7 @@
 		</div>
 
 		{#if call.phase === 'incoming'}
+			<!-- Private ring only -->
 			<div class="bg-muted/50 mb-3 flex items-center gap-3 rounded-xl px-3 py-3">
 				<div
 					class="bg-primary/15 text-primary flex size-12 items-center justify-center rounded-full"
@@ -98,9 +109,6 @@
 					<p class="truncate font-medium">{call.peerName || call.peerId}</p>
 					<p class="text-muted-foreground text-xs">
 						{isVideo ? '邀请你视讯通话' : '邀请你语音通话'}
-						{#if call.callType === 'group'}
-							（群）
-						{/if}
 					</p>
 				</div>
 			</div>
@@ -139,7 +147,7 @@
 					<div
 						class="bg-muted text-muted-foreground flex aspect-video items-center justify-center rounded-lg text-xs"
 					>
-						等待对方加入…
+						{isMeeting ? '等待成员加入…' : '等待对方加入…'}
 					</div>
 				{:else}
 					{#each call.participants as p (p.identity)}
@@ -166,17 +174,27 @@
 				<div
 					class="bg-primary/15 text-primary flex size-16 items-center justify-center rounded-full"
 				>
-					<Phone class="size-8" />
+					{#if isMeeting}
+						<Users class="size-8" />
+					{:else}
+						<Phone class="size-8" />
+					{/if}
 				</div>
 				<p class="text-sm font-medium">
-					{call.phase === 'outgoing' && call.participants.length === 0
-						? '等待对方接听…'
-						: call.peerName || '语音通话中'}
+					{#if isMeeting}
+						{call.phase === 'connecting' ? '正在进入会议…' : '语音会议中'}
+					{:else if call.phase === 'outgoing' && call.participants.length === 0}
+						等待对方接听…
+					{:else}
+						{call.peerName || '语音通话中'}
+					{/if}
 				</p>
 				{#if call.participants.length > 0}
 					<p class="text-muted-foreground text-xs">
 						已连接 · {call.participants.map((p) => p.name).join('、')}
 					</p>
+				{:else if isMeeting}
+					<p class="text-muted-foreground text-xs">成员可随时从群聊加入</p>
 				{/if}
 			</div>
 		{/if}
@@ -209,10 +227,34 @@
 						{/if}
 					</Button>
 				{/if}
-				<Button variant="destructive" size="icon" onclick={() => void call.hangup()} title="挂断">
-					<PhoneOff class="size-4" />
-				</Button>
+				{#if isMeeting}
+					<Button
+						variant="outline"
+						size="icon"
+						onclick={() => void call.hangup()}
+						title="离开会议（其他人继续）"
+					>
+						<LogOut class="size-4" />
+					</Button>
+					<Button
+						variant="destructive"
+						size="icon"
+						onclick={() => void call.endGroupMeeting()}
+						title="结束会议（全员退出）"
+					>
+						<PhoneOff class="size-4" />
+					</Button>
+				{:else}
+					<Button variant="destructive" size="icon" onclick={() => void call.hangup()} title="挂断">
+						<PhoneOff class="size-4" />
+					</Button>
+				{/if}
 			</div>
+			{#if isMeeting}
+				<p class="text-muted-foreground mt-2 text-center text-[10px]">
+					离开 = 仅自己退出 · 结束 = 关闭整个会议
+				</p>
+			{/if}
 		{/if}
 	</div>
 {/if}

@@ -75,9 +75,10 @@ func main() {
 	rpSvc := service.NewRedPacketService(db, walletSvc, friendSvc, groupSvc, hub, natsSvc, msgStore)
 	redPacketCtrl := controller.NewRedPacketController(rpSvc, walletSvc)
 
-	// LiveKit WebRTC tokens (private call + group meeting)
+	// LiveKit WebRTC tokens (private call + group meeting mode)
 	lkSvc := service.NewLiveKitService()
-	livekitCtrl := controller.NewLiveKitController(lkSvc, hub, friendSvc, groupSvc)
+	meetingSvc := service.NewMeetingService()
+	livekitCtrl := controller.NewLiveKitController(lkSvc, hub, friendSvc, groupSvc, meetingSvc)
 
 	// Voice media storage
 	mediaDir := os.Getenv("MEDIA_DIR")

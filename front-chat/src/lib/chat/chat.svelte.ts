@@ -3,6 +3,7 @@ import {
 	chatService,
 	friendService,
 	groupService,
+	livekitService,
 	mediaService,
 	redPacketService,
 	type CreateRedPacketBody
@@ -17,6 +18,7 @@ import {
 	tryOpenWSFrame
 } from './crypto';
 import type {
+	ActiveGroupMeeting,
 	ChatMessage,
 	ChatMode,
 	ConnectionStatus,
@@ -28,6 +30,7 @@ import type {
 	GroupDissolvedEvent,
 	GroupInfo,
 	GroupMembersEvent,
+	MeetingEvent,
 	OnlineUser,
 	PingMessage,
 	PongMessage,
@@ -144,8 +147,10 @@ export function createChatController(opts: {
 	token: string;
 	userId: string;
 	onUnauthorized?: () => void;
-	/** LiveKit call signaling events from the chat WebSocket. */
+	/** LiveKit private call signaling events from the chat WebSocket. */
 	onCallEvent?: (ev: CallEvent) => void;
+	/** Group conference lifecycle (meeting mode — not private ring). */
+	onMeetingEvent?: (ev: MeetingEvent) => void;
 	/** Balance changed (red packet send/claim). */
 	onBalanceChange?: (balance: number) => void;
 	/** Red packet claimed by anyone (refresh cards). */
@@ -182,6 +187,11 @@ export function createChatController(opts: {
 	let lastPreviews = $state<Record<string, { text: string; ts: number }>>({});
 	/** Virtual wallet balance (coins). */
 	let balance = $state(0);
+	/**
+	 * Open group conferences (meeting mode), keyed by group_id.
+	 * Distinct from private 1:1 calls — members join freely.
+	 */
+	let activeMeetings = $state<Record<string, ActiveGroupMeeting>>({});
 	/** Users currently typing in the active conversation (private peer or group). */
 	let typingUsers = $state<TypingUser[]>([]);
 	/** Preformatted hint for UI (kept in sync for reliable reactivity). */
@@ -1040,9 +1050,16 @@ export function createChatController(opts: {
 						applyRecall((raw as RecallEvent).id);
 						return;
 					}
-					// WebRTC call signaling (media on LiveKit).
+					// Private 1:1 call signaling (ring / accept).
 					if ('type' in raw && raw.type === 'call') {
 						opts.onCallEvent?.(raw as CallEvent);
+						return;
+					}
+					// Group conference lifecycle (meeting mode).
+					if ('type' in raw && raw.type === 'meeting') {
+						const me = raw as MeetingEvent;
+						applyMeetingEvent(me);
+						opts.onMeetingEvent?.(me);
 						return;
 					}
 					// Friend invite / accept / remove / block.
@@ -1926,6 +1943,86 @@ export function createChatController(opts: {
 		clearUnread(peer);
 	}
 
+	function applyMeetingEvent(ev: MeetingEvent) {
+		const gid = (ev.group_id || '').trim();
+		if (!gid) return;
+		if (ev.action === 'ended') {
+			const next = { ...activeMeetings };
+			delete next[gid];
+			activeMeetings = next;
+			return;
+		}
+		if (ev.action === 'started' || ev.action === 'joined' || ev.action === 'left') {
+			const media: 'audio' | 'video' = ev.media === 'video' ? 'video' : 'audio';
+			const prev = activeMeetings[gid];
+			activeMeetings = {
+				...activeMeetings,
+				[gid]: {
+					group_id: gid,
+					room: ev.room || prev?.room || `grp_${gid}`,
+					media: media || prev?.media || 'audio',
+					started_by: prev?.started_by || ev.from,
+					started_by_name: prev?.started_by_name || ev.from_name || ev.from,
+					started_at: prev?.started_at || ev.timestamp || Math.floor(Date.now() / 1000),
+					participant_count:
+						typeof ev.participant_count === 'number'
+							? ev.participant_count
+							: (prev?.participant_count ?? 1)
+				}
+			};
+			if (ev.action === 'started' && ev.from !== myUserId) {
+				const gname = groupDisplayName(gid);
+				const kind = media === 'video' ? '视讯' : '语音';
+				toastInfo(
+					`${ev.from_name || ev.from} 开启了 #${gname} ${kind}会议`,
+					'群会议'
+				);
+			}
+		}
+	}
+
+	/** Sync open meeting status for a group (on select / refresh). */
+	async function refreshGroupMeeting(gid: string) {
+		const id = gid.trim();
+		if (!id) return;
+		try {
+			const st = await livekitService.getMeeting(id);
+			if (!st.active) {
+				const next = { ...activeMeetings };
+				delete next[id];
+				activeMeetings = next;
+				return;
+			}
+			activeMeetings = {
+				...activeMeetings,
+				[id]: {
+					group_id: id,
+					room: st.room || `grp_${id}`,
+					media: st.media === 'video' ? 'video' : 'audio',
+					started_by: st.started_by || '',
+					started_by_name: st.started_by_name || st.started_by || '',
+					started_at: st.started_at || 0,
+					participant_count: st.participant_count || 0
+				}
+			};
+		} catch {
+			// ignore (offline / not member)
+		}
+	}
+
+	/** Locally mark a meeting open/closed after REST start/leave/end. */
+	function setActiveMeeting(gid: string, info: ActiveGroupMeeting | null) {
+		const id = gid.trim();
+		if (!id) return;
+		if (!info) {
+			const next = { ...activeMeetings };
+			delete next[id];
+			activeMeetings = next;
+			return;
+		}
+		activeMeetings = { ...activeMeetings, [id]: info };
+	}
+
 	async function selectGroup(g: string) {
 		notifyTypingStop();
 		chatMode = 'group';
@@ -1959,7 +2056,11 @@ export function createChatController(opts: {
 		} else if (!firstJoin) {
 			// Offline rejoin path when WS not ready yet — membership restored on connect.
 		}
-		await Promise.all([loadGroupHistory(g), refreshGroupMembers(g)]);
+		await Promise.all([
+			loadGroupHistory(g),
+			refreshGroupMembers(g),
+			refreshGroupMeeting(g)
+		]);
 	}
 
 	function setChatMode(mode: ChatMode) {
@@ -2002,6 +2103,9 @@ export function createChatController(opts: {
 		},
 		get chatMode() {
 			return chatMode;
+		},
+		get activeMeetings() {
+			return activeMeetings;
 		},
 		get joinedGroups() {
 			return joinedGroups;
@@ -2090,6 +2194,8 @@ export function createChatController(opts: {
 		selectPrivateUser,
 		selectGroup,
 		setChatMode,
+		refreshGroupMeeting,
+		setActiveMeeting,
 		loadPrivateHistory,
 		loadGroupHistory
 	};

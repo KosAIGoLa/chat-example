@@ -76,10 +76,13 @@ func SetupRouter(
 		// Avatar upload (self)
 		api.POST("/avatar", authCtrl.UploadAvatar)
 
-		// LiveKit WebRTC (private call / group meeting)
+		// LiveKit WebRTC: private 1:1 call + group meeting mode
 		if livekitCtrl != nil {
 			api.POST("/livekit/token", livekitCtrl.CreateToken)
 			api.POST("/livekit/signal", livekitCtrl.SignalCall)
+			// Group conference (open / join / leave / end) — not private ring-call
+			api.POST("/livekit/meeting", livekitCtrl.MeetingAction)
+			api.GET("/livekit/meeting/:group_id", livekitCtrl.GetMeeting)
 		}
 	}
 
