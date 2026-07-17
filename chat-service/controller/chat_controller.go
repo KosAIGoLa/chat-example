@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -47,6 +48,7 @@ func (ctrl *ChatController) SetCrypto(c *service.MsgCrypto) {
 }
 
 // GetCryptoKey returns the AES key used to encrypt WebSocket frames and content.
+// The raw key is JWT-wrapped (AES-GCM) and field names are obfuscated — never plaintext.
 // GET /api/crypto/key  (auth required)
 func (ctrl *ChatController) GetCryptoKey(c *gin.Context) {
 	if ctrl.crypto == nil {
@@ -56,15 +58,49 @@ func (ctrl *ChatController) GetCryptoKey(c *gin.Context) {
 		})
 		return
 	}
+	// Prefer raw Authorization bearer so wrap key matches what the browser holds.
+	token := bearerToken(c)
+	if token == "" {
+		// Fallback: query token (rarely used for this endpoint).
+		token = c.Query("token")
+	}
+	if token == "" {
+		c.JSON(http.StatusUnauthorized, dto.APIResponseDTO{
+			Code:    401,
+			Message: "authorization required to unwrap crypto key",
+		})
+		return
+	}
+	wrapped, err := ctrl.crypto.WrapKeyForToken(token)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIResponseDTO{
+			Code:    500,
+			Message: "failed to wrap crypto key",
+		})
+		return
+	}
 	c.JSON(http.StatusOK, dto.APIResponseDTO{
 		Code:    200,
 		Message: "success",
+		// Opaque envelope only — no algorithm / scheme labels for attackers to read.
 		Data: dto.CryptoKeyResponse{
-			Algorithm: ctrl.crypto.Algorithm(),
-			Key:       ctrl.crypto.KeyBase64(),
-			Version:   ctrl.crypto.Version(),
+			V: service.WrapFormatVersion,
+			W: wrapped,
 		},
 	})
+}
+
+// bearerToken extracts the JWT from Authorization: Bearer <token>.
+func bearerToken(c *gin.Context) string {
+	h := strings.TrimSpace(c.GetHeader("Authorization"))
+	if h == "" {
+		return ""
+	}
+	const prefix = "Bearer "
+	if len(h) > len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
+		return strings.TrimSpace(h[len(prefix):])
+	}
+	return ""
 }
 
 // HandleWebSocket upgrades an HTTP connection to WebSocket and registers the client.

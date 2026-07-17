@@ -57,10 +57,15 @@ type TypingEvent struct {
 }
 
 // CryptoKeyResponse is returned to authenticated clients for message encryption.
+// Raw key material is NEVER cleartext — only a JWT-wrapped blob.
+// Do NOT put algorithm names or crypto scheme strings on the wire.
+//
+// Wire (minimal / opaque):
+//
+//	{ "v": 2, "w": "kw:v2:<b64(nonce||ct||tag)>" }
 type CryptoKeyResponse struct {
-	Algorithm string `json:"algorithm"` // AES-GCM
-	Key       string `json:"key"`       // base64 raw 32-byte key
-	Version   int    `json:"version"`   // wire format version
+	V int    `json:"v"` // envelope version (2)
+	W string `json:"w"` // wrapped key blob only
 }
 
 // VoiceUploadResponse is returned after a successful voice upload.

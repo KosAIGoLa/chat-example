@@ -10,7 +10,7 @@ import {
 import {
 	encryptContent,
 	hasMessageKey,
-	importMessageKey,
+	importMessageKeyFromWrapped,
 	isEncryptedContent,
 	sealWSFrame,
 	tryDecryptContent,
@@ -657,7 +657,18 @@ export function createChatController(opts: {
 	async function ensureCryptoKey(): Promise<void> {
 		if (hasMessageKey()) return;
 		const res = await chatService.getCryptoKey();
-		await importMessageKey(res.key);
+		// Response is JWT-wrapped + obfuscated fields (v/a/cv/w) — never cleartext key.
+		const token =
+			(typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null) ||
+			opts.token ||
+			'';
+		if (!token) {
+			throw new Error('missing auth token for crypto key unwrap');
+		}
+		if (!res?.w) {
+			throw new Error('crypto key response missing wrapped blob');
+		}
+		await importMessageKeyFromWrapped(res.w, token);
 	}
 
 	function clearReconnectTimer() {

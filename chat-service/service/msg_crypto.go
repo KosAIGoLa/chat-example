@@ -44,7 +44,7 @@ func NewMsgCrypto(secret string) *MsgCrypto {
 	return &MsgCrypto{key: sum[:]}
 }
 
-// KeyBase64 returns the raw AES key for authenticated clients (Web Crypto import).
+// KeyBase64 returns the raw AES key (base64). Prefer WrapKeyForToken for HTTP delivery.
 func (c *MsgCrypto) KeyBase64() string {
 	return base64.StdEncoding.EncodeToString(c.key)
 }
@@ -54,9 +54,50 @@ func (c *MsgCrypto) Algorithm() string {
 	return "AES-GCM"
 }
 
-// Version is the current wire format version.
+// Version is the current content-crypto wire format version.
 func (c *MsgCrypto) Version() int {
 	return 1
+}
+
+// WrapFormatVersion is the /api/crypto/key envelope version (JWT-wrapped).
+const WrapFormatVersion = 2
+
+const keyWrapPrefix = "kw:v2:"
+
+// deriveWrapKey builds a per-session 32-byte key from the caller's JWT string.
+// Only a client that holds the same JWT can unwrap the message key.
+func deriveWrapKey(token string) []byte {
+	sum := sha256.Sum256([]byte("ws-ex:kw:v2:" + strings.TrimSpace(token)))
+	return sum[:]
+}
+
+// WrapKeyForToken encrypts the raw AES message key for HTTP transport.
+// Returns "kw:v2:" + base64(nonce||ciphertext||tag).
+func (c *MsgCrypto) WrapKeyForToken(token string) (string, error) {
+	if c == nil || len(c.key) != 32 {
+		return "", errors.New("crypto not ready")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", errors.New("token required to wrap key")
+	}
+	wrapKey := deriveWrapKey(token)
+	block, err := aes.NewCipher(wrapKey)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	// Bind AAD to version label so blobs can't be replayed across formats.
+	aad := []byte("ws-ex:crypto-key:v2")
+	sealed := gcm.Seal(nonce, nonce, c.key, aad)
+	return keyWrapPrefix + base64.StdEncoding.EncodeToString(sealed), nil
 }
 
 // Encrypt encrypts plaintext and returns EncPrefix + base64(nonce||ciphertext).

@@ -163,10 +163,15 @@ export interface CallEvent {
 	timestamp?: number;
 }
 
+/**
+ * Opaque JWT-wrapped crypto key envelope from GET /api/crypto/key.
+ * No algorithm labels on the wire — client hardcodes the unwrap scheme.
+ */
 export interface CryptoKeyResponse {
-	algorithm: string;
-	key: string;
-	version: number;
+	/** Envelope version (2). */
+	v: number;
+	/** Wrapped key blob only. */
+	w: string;
 }
 
 export interface VoiceUploadResult {

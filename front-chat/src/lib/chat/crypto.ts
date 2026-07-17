@@ -32,7 +32,55 @@ function bytesToB64(bytes: Uint8Array): string {
 	return btoa(bin);
 }
 
-/** Import raw AES key (base64 from GET /api/crypto/key). */
+const KEY_WRAP_PREFIX = 'kw:v2:';
+const KEY_WRAP_AAD = 'ws-ex:crypto-key:v2';
+
+/**
+ * Derive the same wrap key the server uses: SHA-256("ws-ex:kw:v2:" + jwt).
+ */
+async function deriveWrapKey(token: string): Promise<CryptoKey> {
+	const material = new TextEncoder().encode('ws-ex:kw:v2:' + token.trim());
+	const digest = await crypto.subtle.digest('SHA-256', material);
+	return crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['decrypt']);
+}
+
+/**
+ * Unwrap JWT-wrapped key blob from GET /api/crypto/key.
+ * Returns raw AES key as standard base64 (for importMessageKey).
+ */
+export async function unwrapCryptoKeyResponse(
+	wrapped: string,
+	token: string
+): Promise<string> {
+	if (!wrapped || !token) {
+		throw new Error('wrapped key and token are required');
+	}
+	const blob = wrapped.startsWith(KEY_WRAP_PREFIX)
+		? wrapped.slice(KEY_WRAP_PREFIX.length)
+		: wrapped;
+	const raw = b64ToBytes(blob);
+	if (raw.byteLength < 13) {
+		throw new Error('wrapped key too short');
+	}
+	const wrapKey = await deriveWrapKey(token);
+	const nonce = raw.slice(0, 12);
+	const sealed = raw.slice(12);
+	const nonceBuf = new Uint8Array(nonce);
+	const sealedBuf = new Uint8Array(sealed);
+	const aad = new TextEncoder().encode(KEY_WRAP_AAD);
+	const plain = await crypto.subtle.decrypt(
+		{ name: 'AES-GCM', iv: nonceBuf, additionalData: aad },
+		wrapKey,
+		sealedBuf
+	);
+	const keyBytes = new Uint8Array(plain);
+	if (keyBytes.byteLength !== 32) {
+		throw new Error(`unwrapped key length ${keyBytes.byteLength} (want 32)`);
+	}
+	return bytesToB64(keyBytes);
+}
+
+/** Import raw AES key (base64). */
 export async function importMessageKey(keyBase64: string): Promise<CryptoKey> {
 	if (cachedKey && cachedKeyB64 === keyBase64) return cachedKey;
 	const raw = b64ToBytes(keyBase64);
@@ -49,6 +97,17 @@ export async function importMessageKey(keyBase64: string): Promise<CryptoKey> {
 	cachedKey = key;
 	cachedKeyB64 = keyBase64;
 	return key;
+}
+
+/**
+ * Load message key from obfuscated /api/crypto/key response using the session JWT.
+ */
+export async function importMessageKeyFromWrapped(
+	wrapped: string,
+	token: string
+): Promise<CryptoKey> {
+	const keyB64 = await unwrapCryptoKeyResponse(wrapped, token);
+	return importMessageKey(keyB64);
 }
 
 export function clearMessageKey(): void {
