@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { auth } from '$lib/auth.svelte';
-	import { api } from '$lib/api';
+	import { authService } from '$lib/api';
 	import { Button } from '$lib/components/ui/button';
 	import * as Card from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
@@ -23,9 +23,9 @@
 		loading = true;
 		try {
 			if (mode === 'register') {
-				await api.register(username, password);
+				await authService.register(username, password);
 			}
-			const res = await api.login(username, password);
+			const res = await authService.login(username, password);
 			auth.setAuth(res.token, res.user);
 			window.location.href = '/chat';
 		} catch (err) {

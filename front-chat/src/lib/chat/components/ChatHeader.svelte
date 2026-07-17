@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { ConnectionStatus } from '../types';
-	import { api } from '$lib/api';
+	import { authService } from '$lib/api';
 	import { auth } from '$lib/auth.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -88,7 +88,7 @@
 				body.password = newPassword;
 				body.current_password = currentPassword;
 			}
-			const res = await api.updateProfile(body);
+			const res = await authService.updateProfile(body);
 			auth.setAuth(res.token, res.user);
 			successMsg = 'Profile updated';
 			onProfileUpdated?.(res.user.username, res.token);

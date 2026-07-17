@@ -8,7 +8,7 @@
 		isSystemMessage,
 		isVoiceMessage
 	} from '../utils';
-	import { buildMediaUrl } from '$lib/api';
+	import { mediaService } from '$lib/api';
 	import { cn } from '$lib/utils';
 	import * as Avatar from '$lib/components/ui/avatar';
 	import { Button } from '$lib/components/ui/button';
@@ -38,7 +38,7 @@
 			: ''
 	);
 	const audioSrc = $derived(
-		voice && message.media_url && !recalled ? buildMediaUrl(message.media_url) : ''
+		voice && message.media_url && !recalled ? mediaService.buildMediaUrl(message.media_url) : ''
 	);
 
 	const voiceLabel = $derived(`Voice · ${formatDuration(message.duration)}`);

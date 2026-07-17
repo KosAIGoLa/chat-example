@@ -1,4 +1,10 @@
-import { api, buildWsUrl } from '$lib/api';
+import {
+	buildWsUrl,
+	chatService,
+	friendService,
+	groupService,
+	mediaService
+} from '$lib/api';
 import {
 	encryptContent,
 	hasMessageKey,
@@ -289,7 +295,7 @@ export function createChatController(opts: {
 
 	async function ensureCryptoKey(): Promise<void> {
 		if (hasMessageKey()) return;
-		const res = await api.getCryptoKey();
+		const res = await chatService.getCryptoKey();
 		await importMessageKey(res.key);
 	}
 
@@ -438,7 +444,7 @@ export function createChatController(opts: {
 			} catch (err) {
 				console.error('[ws] rejoin group failed', g, err);
 			}
-			void api.joinGroup(g, { rejoin: true }).catch(() => {
+			void groupService.join(g, { rejoin: true }).catch(() => {
 				// REST join needs WS online; ignore race — WS join_group still applies.
 			});
 		}
@@ -772,7 +778,7 @@ export function createChatController(opts: {
 
 	async function refreshFriends() {
 		try {
-			const res = await api.listFriends();
+			const res = await friendService.listFriends();
 			friends = res.friends ?? [];
 			for (const f of friends) {
 				rememberUsers([{ user_id: f.user_id, username: f.username }]);
@@ -784,7 +790,7 @@ export function createChatController(opts: {
 
 	async function refreshIncomingRequests() {
 		try {
-			const res = await api.listIncomingFriendRequests();
+			const res = await friendService.listIncoming();
 			incomingRequests = res.requests ?? [];
 		} catch {
 			// ignore
@@ -794,24 +800,24 @@ export function createChatController(opts: {
 	async function inviteFriend(username: string) {
 		const name = username.trim();
 		if (!name) throw new Error('Enter a username');
-		const req = await api.inviteFriend({ username: name });
+		const req = await friendService.invite({ username: name });
 		return req;
 	}
 
 	async function acceptFriendRequest(id: number) {
-		const req = await api.acceptFriendRequest(id);
+		const req = await friendService.accept(id);
 		incomingRequests = incomingRequests.filter((r) => r.id !== id);
 		await refreshFriends();
 		return req;
 	}
 
 	async function rejectFriendRequest(id: number) {
-		await api.rejectFriendRequest(id);
+		await friendService.reject(id);
 		incomingRequests = incomingRequests.filter((r) => r.id !== id);
 	}
 
 	async function removeFriend(userId: string) {
-		await api.removeFriend(userId);
+		await friendService.remove(userId);
 		friends = friends.filter((f) => f.user_id !== userId);
 		if (chatMode === 'private' && targetUser === userId) {
 			messages = [];
@@ -836,7 +842,7 @@ export function createChatController(opts: {
 		messages = [];
 		try {
 			await ensureCryptoKey().catch(() => undefined);
-			const res = await api.getPrivateHistory(peerId);
+			const res = await chatService.getPrivateHistory(peerId);
 			if (epoch !== historyEpoch) return;
 			const list = (res.messages ?? []).filter(isChatContent);
 			messages = await decryptMessages(list);
@@ -856,7 +862,7 @@ export function createChatController(opts: {
 		messages = [];
 		try {
 			await ensureCryptoKey().catch(() => undefined);
-			const res = await api.getGroupHistory(g);
+			const res = await chatService.getGroupHistory(g);
 			if (epoch !== historyEpoch) return;
 			const list = (res.messages ?? []).filter(isChatContent);
 			messages = await decryptMessages(list);
@@ -869,7 +875,7 @@ export function createChatController(opts: {
 
 	async function refreshOnlineUsers() {
 		try {
-			const res = await api.getOnlineUsers();
+			const res = await chatService.getOnlineUsers();
 			// Replace entire list from server (authoritative hub-based snapshot).
 			const list = normalizeOnlineList(res.online_users);
 			onlineUsers = list;
@@ -886,7 +892,7 @@ export function createChatController(opts: {
 			return;
 		}
 		try {
-			const res = await api.getGroupMembers(gid);
+			const res = await groupService.members(gid);
 			// Only apply if still viewing this group.
 			if (groupId.trim() !== gid) return;
 			const list = normalizeOnlineList(res.members);
@@ -991,7 +997,7 @@ export function createChatController(opts: {
 		}
 
 		await ensureCryptoKey();
-		const uploaded = await api.uploadVoice(blob, durationSec);
+		const uploaded = await mediaService.uploadVoice(blob, durationSec);
 		const plainLabel = '🎤 Voice message';
 		const cipher = await encryptContent(plainLabel);
 		const wire: ChatMessage = {
@@ -1014,7 +1020,7 @@ export function createChatController(opts: {
 
 	async function refreshMyGroups() {
 		try {
-			const res = await api.listMyGroups();
+			const res = await groupService.listMine();
 			const list = res.groups ?? [];
 			const ids: string[] = [];
 			const meta: Record<string, GroupInfo> = {};
@@ -1032,7 +1038,7 @@ export function createChatController(opts: {
 	}
 
 	async function createGroup(name?: string, customId?: string) {
-		const g = await api.createGroup({
+		const g = await groupService.create({
 			name: name?.trim() || undefined,
 			group_id: customId?.trim() || undefined
 		});
@@ -1061,7 +1067,7 @@ export function createChatController(opts: {
 	async function dissolveGroup(g: string) {
 		const id = g.trim();
 		if (!id) return;
-		await api.dissolveGroup(id);
+		await groupService.dissolve(id);
 		joinedGroups = joinedGroups.filter((g2) => g2 !== id);
 		saveJoinedGroups(joinedGroups);
 		const nextMeta = { ...groupMeta };
@@ -1078,7 +1084,7 @@ export function createChatController(opts: {
 		const g = groupId.trim();
 		if (!g) return;
 		try {
-			await api.joinGroup(g);
+			await groupService.join(g);
 			joinedGroups = [...new Set([...joinedGroups, g])];
 			saveJoinedGroups(joinedGroups);
 			if (ws?.readyState === WebSocket.OPEN) {
@@ -1100,7 +1106,7 @@ export function createChatController(opts: {
 
 	async function leaveGroup(g: string) {
 		try {
-			await api.leaveGroup(g);
+			await groupService.leave(g);
 			joinedGroups = joinedGroups.filter((g2) => g2 !== g);
 			saveJoinedGroups(joinedGroups);
 			const nextMeta = { ...groupMeta };
@@ -1161,7 +1167,7 @@ export function createChatController(opts: {
 		const firstJoin = !joinedGroups.includes(g);
 		if (firstJoin) {
 			try {
-				await api.joinGroup(g);
+				await groupService.join(g);
 				joinedGroups = [...new Set([...joinedGroups, g])];
 				saveJoinedGroups(joinedGroups);
 			} catch {

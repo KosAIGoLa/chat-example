@@ -1,6 +1,15 @@
 export * from './chat';
 export { auth } from './auth.svelte';
-export { api, buildWsUrl } from './api';
+export {
+	api,
+	authService,
+	buildMediaUrl,
+	buildWsUrl,
+	chatService,
+	friendService,
+	groupService,
+	mediaService
+} from './api';
 export type {
 	UserInfo,
 	LoginResponse,
