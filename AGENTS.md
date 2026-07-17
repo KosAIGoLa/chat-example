@@ -39,7 +39,7 @@ Prefer the tool’s native path when present; keep content aligned across copies
 
 ```bash
 docker compose up -d --build
-cd chat-service && go run ./cmd/server
+cd chat-service && go run ./cmd/server   # or: make dev (air hot reload)
 cd front-chat && pnpm install && pnpm dev
 cd front-chat && pnpm check
 ```

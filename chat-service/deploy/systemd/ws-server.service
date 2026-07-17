@@ -1,0 +1,62 @@
+[Unit]
+Description=ws-ex chat-service (WebSocket + REST)
+Documentation=https://github.com/kosbox101/ws-ex
+After=network-online.target
+Wants=network-online.target
+# Uncomment if NATS / Postgres are also systemd units on the same host:
+# After=network-online.target nats-server.service postgresql.service
+# Requires=nats-server.service
+
+[Service]
+Type=simple
+User=ws-chat
+Group=ws-chat
+
+# Install binary + working dir (adjust paths for your host)
+WorkingDirectory=/opt/ws-ex/chat-service
+ExecStart=/opt/ws-ex/chat-service/ws-server
+
+# Optional env file (see deploy/systemd/ws-server.env.example)
+EnvironmentFile=-/etc/ws-ex/ws-server.env
+
+# Defaults if EnvironmentFile is missing (override in the env file)
+Environment=SERVER_ADDR=:8080
+Environment=SHUTDOWN_TIMEOUT=15s
+
+# Graceful stop: SIGTERM → app drains HTTP + WS then exits
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=25
+TimeoutStartSec=30
+
+Restart=on-failure
+RestartSec=3
+# Avoid tight restart loops after crash
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Logging → journald (journalctl -u ws-server -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ws-server
+
+# Hardening (relax ReadWritePaths if media lives elsewhere)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Media uploads + local data
+ReadWritePaths=/opt/ws-ex/chat-service/data
+# If MEDIA_DIR is absolute and outside WorkingDirectory, add it:
+# ReadWritePaths=/opt/ws-ex/chat-service/data /var/lib/ws-ex/media
+
+# Limit open files for many WebSocket clients
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

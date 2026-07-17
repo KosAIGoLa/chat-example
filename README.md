@@ -157,7 +157,8 @@ docker compose up -d
 ```bash
 cd chat-service
 # from repo root: docker compose up -d nats postgres livekit
-go run ./cmd/server
+go run ./cmd/server          # one-shot
+# make dev                  # hot reload (air)
 ```
 
 **Frontend**

@@ -32,5 +32,9 @@ ENV DB_USER=chat
 ENV DB_PASSWORD=chatpass
 ENV DB_NAME=chatdb
 ENV JWT_SECRET=change-me-in-production
+ENV SHUTDOWN_TIMEOUT=15s
+
+# Compose / orchestrators send SIGTERM; app drains HTTP+WS then exits.
+STOPSIGNAL SIGTERM
 
 CMD ["./ws-server"]

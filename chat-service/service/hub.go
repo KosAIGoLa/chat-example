@@ -22,6 +22,7 @@ type Hub struct {
 	offline   *OfflineService
 	presenceT *time.Ticker
 	mu        sync.RWMutex
+	closed    bool
 }
 
 // SetOffline attaches the offline message flusher (called after WS register).
@@ -47,6 +48,56 @@ func (h *Hub) SetNATS(ns *NATSService) {
 			h.refreshPresence()
 		}
 	}()
+}
+
+// Close stops presence heartbeats, marks local users offline, and closes all WebSockets.
+// Safe to call multiple times (graceful shutdown).
+func (h *Hub) Close() {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return
+	}
+	h.closed = true
+	if h.presenceT != nil {
+		h.presenceT.Stop()
+		h.presenceT = nil
+	}
+
+	type userRef struct {
+		id, name string
+	}
+	users := make([]userRef, 0, len(h.clients))
+	clients := make([]*model.Client, 0)
+	for uid, conns := range h.clients {
+		name := uid
+		for c := range conns {
+			if c.Username != "" {
+				name = c.Username
+			}
+			clients = append(clients, c)
+		}
+		users = append(users, userRef{id: uid, name: name})
+	}
+	h.clients = make(map[string]map[*model.Client]struct{})
+	h.groups = make(map[string]map[*model.Client]struct{})
+	nats := h.nats
+	h.mu.Unlock()
+
+	if nats != nil {
+		for _, u := range users {
+			if err := nats.SetPresence(u.id, u.name, false); err != nil {
+				log.Printf("[Hub] shutdown clear presence %s: %v", u.id, err)
+			}
+			if err := nats.PublishPresence(u.id, u.name, false); err != nil {
+				log.Printf("[Hub] shutdown publish offline %s: %v", u.id, err)
+			}
+		}
+	}
+	for _, c := range clients {
+		c.Close()
+	}
+	log.Printf("[Hub] closed (%d connection(s), %d user(s))", len(clients), len(users))
 }
 
 // refreshPresence re-publishes all local users' presence to KV to prevent TTL expiry.
@@ -85,6 +136,11 @@ func (h *Hub) refreshPresence() {
 // Multiple tabs may stay online simultaneously (previously they kicked each other → reconnect loop).
 func (h *Hub) Register(client *model.Client) {
 	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		client.Close()
+		return
+	}
 	if h.clients[client.UserID] == nil {
 		h.clients[client.UserID] = make(map[*model.Client]struct{})
 	}

@@ -1,0 +1,8 @@
+# Air / local build output
+/tmp/
+*.exe
+*.test
+*.out
+
+# Local media uploads
+/data/
