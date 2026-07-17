@@ -3,6 +3,7 @@
 Chat stack monorepo: Go backend and Svelte frontend are separate projects.
 
 ![screen](screen/img.png)
+![screen](screen/img1.png)
 
 ```
 ws-ex/
