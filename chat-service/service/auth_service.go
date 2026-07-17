@@ -106,6 +106,29 @@ func (s *AuthService) GetUser(userID uint) (*model.User, error) {
 	return &user, nil
 }
 
+// SetAvatar updates avatar path + revision for the user.
+func (s *AuthService) SetAvatar(userID uint, avatarPath string) (*model.User, error) {
+	var user model.User
+	if err := s.db.First(&user, userID).Error; err != nil {
+		return nil, errors.New("user not found")
+	}
+	user.Avatar = avatarPath
+	user.AvatarRev = time.Now().Unix()
+	if err := s.db.Save(&user).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// GetAvatarURL returns the public path for a user id (empty if none).
+func (s *AuthService) GetAvatarURL(userID uint) (url string, rev int64, err error) {
+	var user model.User
+	if err := s.db.Select("id", "avatar", "avatar_rev").First(&user, userID).Error; err != nil {
+		return "", 0, errors.New("user not found")
+	}
+	return user.Avatar, user.AvatarRev, nil
+}
+
 // UpdateProfile updates username and optionally password. Returns a fresh JWT.
 func (s *AuthService) UpdateProfile(userID uint, username, newPassword, currentPassword string) (string, *model.User, error) {
 	var user model.User

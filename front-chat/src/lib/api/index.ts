@@ -9,7 +9,8 @@
  */
 
 export { API_BASE, ApiError, request, requestForm, buildAuthedUrl } from './client';
-export { authService } from './auth.service';
+export { authService, avatarUrl } from './auth.service';
+export type { AvatarUploadResult } from './auth.service';
 export { friendService } from './friend.service';
 export { groupService } from './group.service';
 export { chatService } from './chat.service';

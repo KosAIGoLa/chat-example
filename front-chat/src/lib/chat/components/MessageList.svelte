@@ -8,6 +8,10 @@
 		messages: ChatMessage[];
 		myUserId: string;
 		loading?: boolean;
+		/** Resolve user id → display name for avatars. */
+		resolveName?: (userId: string) => string;
+		/** Resolve user id → avatar image URL. */
+		resolveAvatar?: (userId: string) => string;
 		onRecall?: (msg: ChatMessage) => void;
 		onResend?: (msg: ChatMessage) => void;
 		onBalanceChange?: (balance: number) => void;
@@ -17,6 +21,8 @@
 		messages,
 		myUserId,
 		loading = false,
+		resolveName,
+		resolveAvatar,
 		onRecall,
 		onResend,
 		onBalanceChange
@@ -59,7 +65,15 @@
 				</div>
 			{:else}
 				{#each messages as msg, i (`${msg.id ?? ''}-${msg.timestamp ?? 0}-${msg.from}-${msg.to}-${msg.media_url ?? ''}-${msg.content_type ?? ''}-${i}`)}
-					<MessageBubble message={msg} {myUserId} {onRecall} {onResend} {onBalanceChange} />
+					<MessageBubble
+						message={msg}
+						{myUserId}
+						fromName={resolveName?.(msg.from) || msg.from}
+						avatarSrc={resolveAvatar?.(msg.from) || ''}
+						{onRecall}
+						{onResend}
+						{onBalanceChange}
+					/>
 				{/each}
 			{/if}
 			<div bind:this={bottomEl} class="h-px w-full shrink-0"></div>

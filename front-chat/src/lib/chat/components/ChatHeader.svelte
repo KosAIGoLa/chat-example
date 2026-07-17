@@ -15,6 +15,8 @@
 	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
 	import UserCog from '@lucide/svelte/icons/user-cog';
 	import Coins from '@lucide/svelte/icons/coins';
+	import Camera from '@lucide/svelte/icons/camera';
+	import UserAvatar from './UserAvatar.svelte';
 
 	interface Props {
 		username: string;
@@ -28,6 +30,8 @@
 		onReconnect?: () => void;
 		/** Called after profile save so parent can refresh displayed name / token. */
 		onProfileUpdated?: (username: string, token: string) => void;
+		/** Called after avatar upload (parent may force avatar URL refresh). */
+		onAvatarUpdated?: (avatarUrl: string, rev: number) => void;
 	}
 
 	let {
@@ -37,7 +41,8 @@
 		balance = 0,
 		onLogout,
 		onReconnect,
-		onProfileUpdated
+		onProfileUpdated,
+		onAvatarUpdated
 	}: Props = $props();
 
 	let open = $state(false);
@@ -45,8 +50,10 @@
 	let currentPassword = $state('');
 	let newPassword = $state('');
 	let saving = $state(false);
+	let uploadingAvatar = $state(false);
 	let errorMsg = $state('');
 	let successMsg = $state('');
+	let fileInput: HTMLInputElement | undefined = $state();
 
 	const statusVariant = $derived(
 		connectionStatus === 'connected'
@@ -64,6 +71,14 @@
 			: connectionStatus
 	);
 
+	const myAvatarSrc = $derived.by(() => {
+		const u = auth.user;
+		if (!u?.id) return '';
+		if (!u.avatar && !u.avatar_rev) return '';
+		const rev = u.avatar_rev || 0;
+		return `/api/avatar/${u.id}${rev ? `?v=${rev}` : ''}`;
+	});
+
 	function openProfile() {
 		editUsername = username;
 		currentPassword = '';
@@ -76,7 +91,7 @@
 	async function saveProfile() {
 		const name = editUsername.trim();
 		if (name.length < 3) {
-			errorMsg = 'Username must be at least 3 characters';
+			errorMsg = '用户名至少 3 个字符';
 			return;
 		}
 		saving = true;
@@ -93,15 +108,56 @@
 				body.current_password = currentPassword;
 			}
 			const res = await authService.updateProfile(body);
-			auth.setAuth(res.token, res.user);
-			successMsg = 'Profile updated';
+			// Keep avatar fields from previous user if update profile doesn't return them.
+			const merged = {
+				...auth.user,
+				...res.user,
+				avatar: res.user.avatar ?? auth.user?.avatar,
+				avatar_rev: res.user.avatar_rev ?? auth.user?.avatar_rev
+			};
+			auth.setAuth(res.token, merged);
+			successMsg = '资料已更新';
 			onProfileUpdated?.(res.user.username, res.token);
 			currentPassword = '';
 			newPassword = '';
 		} catch (err) {
-			errorMsg = (err as Error).message || 'Update failed';
+			errorMsg = (err as Error).message || '更新失败';
 		} finally {
 			saving = false;
+		}
+	}
+
+	async function onPickAvatar(e: Event) {
+		const input = e.target as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (!file) return;
+		if (!file.type.startsWith('image/')) {
+			errorMsg = '请选择图片文件（jpg/png/webp/gif）';
+			return;
+		}
+		if (file.size > 2 * 1024 * 1024) {
+			errorMsg = '图片不能超过 2MB';
+			return;
+		}
+		uploadingAvatar = true;
+		errorMsg = '';
+		successMsg = '';
+		try {
+			const res = await authService.uploadAvatar(file);
+			if (auth.user) {
+				auth.updateUser({
+					...auth.user,
+					avatar: res.avatar,
+					avatar_rev: res.avatar_rev
+				});
+			}
+			successMsg = '头像已更新';
+			onAvatarUpdated?.(res.url || res.avatar, res.avatar_rev);
+		} catch (err) {
+			errorMsg = (err as Error).message || '头像上传失败';
+		} finally {
+			uploadingAvatar = false;
 		}
 	}
 </script>
@@ -143,9 +199,22 @@
 				<Coins class="size-3.5" />
 				{balance}
 			</Badge>
-			<span class="text-muted-foreground hidden text-sm sm:inline">
-				<span class="text-foreground font-medium">{username}</span>
-			</span>
+			<button
+				type="button"
+				class="hidden items-center gap-2 sm:flex"
+				onclick={openProfile}
+				title="个人资料"
+			>
+				<UserAvatar
+					class="size-8 ring-1 ring-border"
+					name={username || auth.user?.username || '?'}
+					userId={String(auth.user?.id ?? '')}
+					src={myAvatarSrc}
+					primary
+					alt={username}
+				/>
+				<span class="text-foreground text-sm font-medium">{username}</span>
+			</button>
 			<Separator orientation="vertical" class="hidden h-5 sm:block" />
 			<Button variant="outline" size="sm" onclick={openProfile} title="个人资料">
 				<UserCog class="size-4" />
@@ -162,39 +231,80 @@
 <Sheet.Root bind:open>
 	<Sheet.Content side="right" class="w-full sm:max-w-md">
 		<Sheet.Header>
-			<Sheet.Title>Edit profile</Sheet.Title>
-			<Sheet.Description>Update your account name or password.</Sheet.Description>
+			<Sheet.Title>个人资料</Sheet.Title>
+			<Sheet.Description>修改头像、用户名或密码。</Sheet.Description>
 		</Sheet.Header>
 
 		<div class="flex flex-1 flex-col gap-4 px-4 pb-4">
+			<!-- Avatar upload -->
+			<div class="flex flex-col items-center gap-3 py-2">
+				<div class="relative">
+					<UserAvatar
+						class="size-24 shadow-md ring-2 ring-border"
+						name={username || auth.user?.username || '?'}
+						userId={String(auth.user?.id ?? '')}
+						src={myAvatarSrc}
+						primary
+						textClass="text-2xl"
+						alt={username}
+					/>
+					<button
+						type="button"
+						class="bg-background absolute right-0 bottom-0 flex size-8 items-center justify-center rounded-full border shadow-sm hover:bg-muted"
+						disabled={uploadingAvatar}
+						onclick={() => fileInput?.click()}
+						title="更换头像"
+						aria-label="更换头像"
+					>
+						{#if uploadingAvatar}
+							<LoaderCircle class="size-4 animate-spin" />
+						{:else}
+							<Camera class="size-4" />
+						{/if}
+					</button>
+					<input
+						bind:this={fileInput}
+						type="file"
+						accept="image/jpeg,image/png,image/webp,image/gif"
+						class="hidden"
+						onchange={onPickAvatar}
+					/>
+				</div>
+				<p class="text-muted-foreground text-center text-xs">
+					点击相机更换头像 · jpg / png / webp · 最大 2MB
+				</p>
+			</div>
+
+			<Separator />
+
 			<div class="space-y-2">
-				<Label for="profile-username">Username</Label>
+				<Label for="profile-username">用户名</Label>
 				<Input id="profile-username" bind:value={editUsername} autocomplete="username" />
 			</div>
 
 			<Separator />
 
 			<p class="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-				Change password (optional)
+				修改密码（可选）
 			</p>
 			<div class="space-y-2">
-				<Label for="profile-current-pw">Current password</Label>
+				<Label for="profile-current-pw">当前密码</Label>
 				<Input
 					id="profile-current-pw"
 					type="password"
 					bind:value={currentPassword}
 					autocomplete="current-password"
-					placeholder="Required only if setting a new password"
+					placeholder="仅在修改密码时需要"
 				/>
 			</div>
 			<div class="space-y-2">
-				<Label for="profile-new-pw">New password</Label>
+				<Label for="profile-new-pw">新密码</Label>
 				<Input
 					id="profile-new-pw"
 					type="password"
 					bind:value={newPassword}
 					autocomplete="new-password"
-					placeholder="Leave blank to keep current"
+					placeholder="留空则不修改"
 				/>
 			</div>
 
@@ -207,13 +317,13 @@
 		</div>
 
 		<Sheet.Footer class="gap-2 sm:flex-row">
-			<Button variant="outline" onclick={() => (open = false)} disabled={saving}>Cancel</Button>
+			<Button variant="outline" onclick={() => (open = false)} disabled={saving}>取消</Button>
 			<Button onclick={saveProfile} disabled={saving}>
 				{#if saving}
 					<LoaderCircle class="size-4 animate-spin" />
-					Saving…
+					保存中…
 				{:else}
-					Save
+					保存
 				{/if}
 			</Button>
 		</Sheet.Footer>

@@ -16,7 +16,7 @@ import (
 	"ws-ex/model"
 )
 
-// RedPacketService creates and claims private/group red packets.
+// RedPacketService creates and claims private/group/designated red packets.
 type RedPacketService struct {
 	db       *gorm.DB
 	wallet   *WalletService
@@ -45,8 +45,8 @@ func NewRedPacketService(
 // Create deducts balance, stores packet, publishes chat message.
 func (s *RedPacketService) Create(fromUID uint, fromName string, req dto.CreateRedPacketRequest) (*dto.RedPacketDTO, *dto.ChatMessageDTO, error) {
 	kind := strings.ToLower(strings.TrimSpace(req.Type))
-	if kind != model.RedPacketTypePrivate && kind != model.RedPacketTypeGroup {
-		return nil, nil, errors.New("type must be private or group")
+	if kind != model.RedPacketTypePrivate && kind != model.RedPacketTypeGroup && kind != model.RedPacketTypeDesignated {
+		return nil, nil, errors.New("type must be private, group, or designated")
 	}
 	if req.TotalAmount <= 0 {
 		return nil, nil, errors.New("total_amount must be positive")
@@ -63,6 +63,8 @@ func (s *RedPacketService) Create(fromUID uint, fromName string, req dto.CreateR
 	totalCount := 1
 	peerID := strings.TrimSpace(req.PeerID)
 	groupID := strings.TrimSpace(req.GroupID)
+	targetIDs := normalizeTargetIDs(req.TargetUserIDs)
+	targetsJSON := ""
 
 	switch kind {
 	case model.RedPacketTypePrivate:
@@ -95,6 +97,45 @@ func (s *RedPacketService) Create(fromUID uint, fromName string, req dto.CreateR
 		if req.TotalAmount < int64(totalCount) {
 			return nil, nil, errors.New("total_amount must be >= total_count")
 		}
+	case model.RedPacketTypeDesignated:
+		// 指定红包：群聊中指定成员均分领取
+		if groupID == "" {
+			return nil, nil, errors.New("group_id is required for designated red packet")
+		}
+		if s.groups != nil && !s.groups.IsMember(fromUID, groupID) {
+			return nil, nil, errors.New("not a group member")
+		}
+		if len(targetIDs) < 1 {
+			return nil, nil, errors.New("target_user_ids required for designated red packet")
+		}
+		if len(targetIDs) > 200 {
+			return nil, nil, errors.New("too many designated recipients")
+		}
+		memberSet := map[string]struct{}{}
+		if s.groups != nil {
+			for _, mid := range s.groups.MemberUserIDs(groupID) {
+				memberSet[mid] = struct{}{}
+			}
+		}
+		for _, tid := range targetIDs {
+			if tid == "" {
+				return nil, nil, errors.New("invalid target_user_id")
+			}
+			if s.groups != nil {
+				if _, ok := memberSet[tid]; !ok {
+					return nil, nil, fmt.Errorf("user %s is not a group member", tid)
+				}
+			}
+		}
+		totalCount = len(targetIDs)
+		if req.TotalAmount < int64(totalCount) {
+			return nil, nil, errors.New("total_amount must be >= number of recipients")
+		}
+		b, err := json.Marshal(targetIDs)
+		if err != nil {
+			return nil, nil, errors.New("invalid target_user_ids")
+		}
+		targetsJSON = string(b)
 	}
 
 	packetID := NewMessageID()
@@ -113,6 +154,7 @@ func (s *RedPacketService) Create(fromUID uint, fromName string, req dto.CreateR
 			FromUserID:      fromStr,
 			ToUserID:        peerID,
 			GroupID:         groupID,
+			TargetUserIDs:   targetsJSON,
 			TotalAmount:     req.TotalAmount,
 			TotalCount:      totalCount,
 			RemainingAmount: req.TotalAmount,
@@ -130,16 +172,20 @@ func (s *RedPacketService) Create(fromUID uint, fromName string, req dto.CreateR
 	}
 
 	// Chat card payload (plaintext; not encrypted).
-	body, _ := json.Marshal(map[string]interface{}{
+	bodyMap := map[string]interface{}{
 		"greeting":     greeting,
 		"total_amount": req.TotalAmount,
 		"total_count":  totalCount,
 		"packet_type":  kind,
-	})
+	}
+	if kind == model.RedPacketTypeDesignated {
+		bodyMap["target_user_ids"] = targetIDs
+	}
+	body, _ := json.Marshal(bodyMap)
 
 	chatMsg := &dto.ChatMessageDTO{
 		ID:          msgID,
-		Type:        kind, // private | group
+		Type:        kind, // private | group | designated (normalized below)
 		From:        fromStr,
 		Content:     string(body),
 		Timestamp:   now.Unix(),
@@ -150,6 +196,7 @@ func (s *RedPacketService) Create(fromUID uint, fromName string, req dto.CreateR
 	if kind == model.RedPacketTypePrivate {
 		chatMsg.To = peerID
 	} else {
+		// group + designated both land in the group conversation
 		chatMsg.To = groupID
 		chatMsg.GroupID = groupID
 		chatMsg.Type = "group"
@@ -178,13 +225,11 @@ func (s *RedPacketService) Create(fromUID uint, fromName string, req dto.CreateR
 	var pubErr error
 	if kind == model.RedPacketTypePrivate {
 		pubErr = s.nats.PublishPrivate(chatMsg)
-		// Echo to sender tabs.
 		if data, err := json.Marshal(chatMsg); err == nil {
 			s.hub.DeliverToUser(fromStr, data)
 		}
 	} else {
 		pubErr = s.nats.PublishGroup(chatMsg)
-		// Echo to sender (group handler skips sender for non-system).
 		if data, err := json.Marshal(chatMsg); err == nil {
 			s.hub.DeliverToUser(fromStr, data)
 		}
@@ -196,7 +241,7 @@ func (s *RedPacketService) Create(fromUID uint, fromName string, req dto.CreateR
 	return s.toDTO(&packet, fromStr, nil), chatMsg, nil
 }
 
-// Claim grabs a packet. Private = full remaining; group = random (double-average).
+// Claim grabs a packet. Private = full; group = random; designated = equal among targets.
 func (s *RedPacketService) Claim(userID uint, username, packetID string) (*dto.ClaimRedPacketResponse, error) {
 	uidStr := fmt.Sprintf("%d", userID)
 	if username == "" {
@@ -243,15 +288,39 @@ func (s *RedPacketService) Claim(userID uint, username, packetID string) (*dto.C
 			if s.groups != nil && !s.groups.IsMember(userID, packet.GroupID) {
 				return errors.New("not a group member")
 			}
-			// Sender may also claim in group (WeChat-style).
+		case model.RedPacketTypeDesignated:
+			if s.groups != nil && !s.groups.IsMember(userID, packet.GroupID) {
+				return errors.New("not a group member")
+			}
+			targets := parseTargetIDs(packet.TargetUserIDs)
+			if !containsStr(targets, uidStr) {
+				return errors.New("you are not a designated recipient")
+			}
 		default:
 			return errors.New("invalid packet type")
 		}
 
 		amount := int64(0)
-		if packet.Type == model.RedPacketTypePrivate || packet.RemainingCount == 1 {
+		switch {
+		case packet.Type == model.RedPacketTypePrivate || packet.RemainingCount == 1:
 			amount = packet.RemainingAmount
-		} else {
+		case packet.Type == model.RedPacketTypeDesignated:
+			// Equal split among remaining designated shares.
+			amount = packet.RemainingAmount / int64(packet.RemainingCount)
+			if amount < 1 {
+				amount = 1
+			}
+			// Last share takes remainder.
+			if packet.RemainingCount == 1 {
+				amount = packet.RemainingAmount
+			} else {
+				// Leave at least 1 per remaining slot after this grab.
+				minLeft := int64(packet.RemainingCount - 1)
+				if packet.RemainingAmount-amount < minLeft {
+					amount = packet.RemainingAmount - minLeft
+				}
+			}
+		default:
 			// Double-average method (WeChat-style luck red packet).
 			max := 2 * packet.RemainingAmount / int64(packet.RemainingCount)
 			if max < 1 {
@@ -261,7 +330,6 @@ func (s *RedPacketService) Claim(userID uint, username, packetID string) (*dto.C
 			if amount > packet.RemainingAmount {
 				amount = packet.RemainingAmount
 			}
-			// Leave at least 1 per remaining slot after this grab.
 			minLeft := int64(packet.RemainingCount - 1)
 			if packet.RemainingAmount-amount < minLeft {
 				amount = packet.RemainingAmount - minLeft
@@ -297,11 +365,9 @@ func (s *RedPacketService) Claim(userID uint, username, packetID string) (*dto.C
 			return err
 		}
 
-		bal, _ := s.wallet.GetBalance(userID)
-		// GetBalance reads outside lock — re-read inside tx
 		var u model.User
 		_ = tx.Select("balance").First(&u, userID).Error
-		bal = u.Balance
+		bal := u.Balance
 
 		result = dto.ClaimRedPacketResponse{
 			PacketID:       packetID,
@@ -392,6 +458,12 @@ func (s *RedPacketService) toDTO(p *model.RedPacket, viewer string, claims []mod
 		ExpiresAt:       p.ExpiresAt.Unix(),
 		CreatedAt:       p.CreatedAt.Unix(),
 	}
+	if p.Type == model.RedPacketTypeDesignated {
+		targets := parseTargetIDs(p.TargetUserIDs)
+		out.TargetUserIDs = targets
+		can := containsStr(targets, viewer)
+		out.CanClaim = &can
+	}
 	for _, c := range claims {
 		out.Claims = append(out.Claims, dto.RedPacketClaimDTO{
 			UserID:    c.UserID,
@@ -415,7 +487,7 @@ func (s *RedPacketService) broadcastClaim(packet model.RedPacket, ev dto.RedPack
 	case model.RedPacketTypePrivate:
 		s.hub.DeliverToUser(packet.FromUserID, data)
 		s.hub.DeliverToUser(packet.ToUserID, data)
-	case model.RedPacketTypeGroup:
+	case model.RedPacketTypeGroup, model.RedPacketTypeDesignated:
 		for _, c := range s.hub.GetGroupMembers(packet.GroupID) {
 			select {
 			case c.Send <- data:
@@ -425,4 +497,50 @@ func (s *RedPacketService) broadcastClaim(packet model.RedPacket, ev dto.RedPack
 		// Also notify sender if not in hub group room.
 		s.hub.DeliverToUser(packet.FromUserID, data)
 	}
+}
+
+func normalizeTargetIDs(ids []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func parseTargetIDs(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		// Fallback: comma-separated
+		parts := strings.Split(raw, ",")
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				ids = append(ids, p)
+			}
+		}
+		return ids
+	}
+	return normalizeTargetIDs(ids)
+}
+
+func containsStr(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }

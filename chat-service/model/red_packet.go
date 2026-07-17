@@ -3,8 +3,9 @@ package model
 import "time"
 
 const (
-	RedPacketTypePrivate = "private"
-	RedPacketTypeGroup   = "group"
+	RedPacketTypePrivate    = "private"
+	RedPacketTypeGroup      = "group"
+	RedPacketTypeDesignated = "designated" // 指定红包：群内指定成员可领
 
 	RedPacketStatusOpen     = "open"
 	RedPacketStatusFinished = "finished"
@@ -12,13 +13,15 @@ const (
 	RedPacketStatusRefunded = "refunded"
 )
 
-// RedPacket is a private (full claim) or group (random claim) packet.
+// RedPacket is a private (full claim), group (random), or designated (equal among targets) packet.
 type RedPacket struct {
-	ID              string    `gorm:"primaryKey;size:36" json:"id"`
-	Type            string    `gorm:"size:16;index;not null" json:"type"` // private | group
-	FromUserID      string    `gorm:"size:32;index;not null" json:"from_user_id"`
-	ToUserID        string    `gorm:"size:32;index" json:"to_user_id"`
-	GroupID         string    `gorm:"size:64;index" json:"group_id"`
+	ID         string `gorm:"primaryKey;size:36" json:"id"`
+	Type       string `gorm:"size:16;index;not null" json:"type"` // private | group | designated
+	FromUserID string `gorm:"size:32;index;not null" json:"from_user_id"`
+	ToUserID   string `gorm:"size:32;index" json:"to_user_id"`
+	GroupID    string `gorm:"size:64;index" json:"group_id"`
+	// TargetUserIDs is a JSON array of user id strings (designated only).
+	TargetUserIDs   string    `gorm:"type:text" json:"target_user_ids,omitempty"`
 	TotalAmount     int64     `gorm:"not null" json:"total_amount"`
 	TotalCount      int       `gorm:"not null" json:"total_count"`
 	RemainingAmount int64     `gorm:"not null" json:"remaining_amount"`

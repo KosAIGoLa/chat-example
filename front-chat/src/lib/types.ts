@@ -2,6 +2,10 @@ export interface UserInfo {
 	id: number;
 	username: string;
 	balance?: number;
+	/** Public path e.g. /api/avatar/11 */
+	avatar?: string;
+	/** Cache-bust revision */
+	avatar_rev?: number;
 }
 
 export interface LoginResponse {

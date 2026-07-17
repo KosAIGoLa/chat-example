@@ -352,6 +352,21 @@
 				messages={chat.messages}
 				myUserId={chat.myUserId}
 				loading={chat.historyLoading}
+				resolveName={(uid) =>
+					uid === chat.myUserId ? displayUsername || uid : chat.displayName(uid)
+				}
+				resolveAvatar={(uid) => {
+					// Self: only when a photo was uploaded (avoid 404 flicker).
+					if (uid === chat.myUserId && auth.user) {
+						const rev = auth.user.avatar_rev || 0;
+						if (auth.user.avatar || rev > 0) {
+							return `/api/avatar/${uid}${rev ? `?v=${rev}` : ''}`;
+						}
+						return '';
+					}
+					// Peer: probe /api/avatar/:id — UserAvatar shows letters if 404.
+					return `/api/avatar/${encodeURIComponent(uid)}`;
+				}}
 				onRecall={(msg) => void chat.recallMessage(msg)}
 				onResend={(msg) => void chat.resendMessage(msg)}
 				onBalanceChange={(b) => {
@@ -388,6 +403,8 @@
 		open={redPacketOpen}
 		chatMode={chat.chatMode}
 		{balance}
+		members={chat.groupMembers}
+		myUserId={chat.myUserId}
 		onClose={() => (redPacketOpen = false)}
 		onSend={async (opts) => {
 			await chat.sendRedPacket(opts);

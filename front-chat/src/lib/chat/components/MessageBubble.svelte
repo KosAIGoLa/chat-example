@@ -3,7 +3,6 @@
 	import {
 		canRecallMessage,
 		formatDuration,
-		formatMessageLabel,
 		isOwnMessage,
 		isRedPacketMessage,
 		isSystemMessage,
@@ -11,7 +10,6 @@
 	} from '../utils';
 	import { mediaService } from '$lib/api';
 	import { cn } from '$lib/utils';
-	import * as Avatar from '$lib/components/ui/avatar';
 	import { Button } from '$lib/components/ui/button';
 	import Mic from '@lucide/svelte/icons/mic';
 	import Undo2 from '@lucide/svelte/icons/undo-2';
@@ -19,16 +17,29 @@
 	import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 	import CircleAlert from '@lucide/svelte/icons/circle-alert';
 	import RedPacketCard from './RedPacketCard.svelte';
+	import UserAvatar from './UserAvatar.svelte';
 
 	interface Props {
 		message: ChatMessage;
 		myUserId: string;
+		/** Optional display name for message.from (username). */
+		fromName?: string;
+		/** Optional avatar image URL for message.from. */
+		avatarSrc?: string;
 		onRecall?: (msg: ChatMessage) => void;
 		onResend?: (msg: ChatMessage) => void;
 		onBalanceChange?: (balance: number) => void;
 	}
 
-	let { message, myUserId, onRecall, onResend, onBalanceChange }: Props = $props();
+	let {
+		message,
+		myUserId,
+		fromName = '',
+		avatarSrc = '',
+		onRecall,
+		onResend,
+		onBalanceChange
+	}: Props = $props();
 
 	const own = $derived(isOwnMessage(message, myUserId));
 	const voice = $derived(isVoiceMessage(message));
@@ -44,7 +55,7 @@
 	);
 	const sending = $derived(message.send_status === 'sending' || message.send_status === 'pending');
 	const failed = $derived(message.send_status === 'failed');
-	const initial = $derived((message.from || '?').slice(0, 1).toUpperCase());
+	const displayLabel = $derived((fromName || message.from || '?').trim() || '?');
 	const timeLabel = $derived(
 		message.timestamp
 			? new Date(message.timestamp * 1000).toLocaleTimeString([], {
@@ -57,7 +68,7 @@
 		voice && message.media_url && !recalled ? mediaService.buildMediaUrl(message.media_url) : ''
 	);
 
-	const voiceLabel = $derived(`Voice · ${formatDuration(message.duration)}`);
+	const voiceLabel = $derived(`语音 · ${formatDuration(message.duration)}`);
 </script>
 
 {#if system}
@@ -83,23 +94,32 @@
 		</div>
 	</div>
 {:else}
-	<div class={cn('group flex w-full gap-2', own ? 'flex-row-reverse' : 'flex-row')}>
-		{#if !own}
-			<Avatar.Root class="size-8 shrink-0">
-				<Avatar.Fallback class="bg-muted text-muted-foreground text-xs font-medium">
-					{initial}
-				</Avatar.Fallback>
-			</Avatar.Root>
-		{/if}
+	<div class={cn('group flex w-full items-end gap-2.5', own ? 'flex-row-reverse' : 'flex-row')}>
+		<!-- Always show letter avatar; photo only overlays when URL loads -->
+		<div class="mb-0.5 shrink-0">
+			<UserAvatar
+				class="size-10"
+				name={displayLabel}
+				userId={message.from}
+				src={avatarSrc}
+				primary={own}
+				alt={displayLabel}
+			/>
+		</div>
 
 		<div
 			class={cn(
-				'flex max-w-[min(32rem,80%)] flex-col gap-1',
+				'flex max-w-[min(32rem,calc(100%-3rem))] flex-col gap-1',
 				own ? 'items-end' : 'items-start'
 			)}
 		>
-			<div class="text-muted-foreground flex items-center gap-2 px-1 text-[11px]">
-				<span>{formatMessageLabel(message)}</span>
+			<div
+				class={cn(
+					'text-muted-foreground flex items-center gap-2 px-1 text-[11px]',
+					own ? 'flex-row-reverse' : 'flex-row'
+				)}
+			>
+				<span class="max-w-[12rem] truncate font-medium">{displayLabel}</span>
 				{#if timeLabel}
 					<span class="opacity-70">{timeLabel}</span>
 				{/if}

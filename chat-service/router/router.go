@@ -73,6 +73,9 @@ func SetupRouter(
 		// Voice messages
 		api.POST("/voice", mediaCtrl.UploadVoice)
 
+		// Avatar upload (self)
+		api.POST("/avatar", authCtrl.UploadAvatar)
+
 		// LiveKit WebRTC (private call / group meeting)
 		if livekitCtrl != nil {
 			api.POST("/livekit/token", livekitCtrl.CreateToken)
@@ -82,6 +85,9 @@ func SetupRouter(
 
 	// Voice playback: Authorization header OR ?token= (for <audio src>).
 	r.GET("/api/voice/:filename", middleware.AuthOrQueryToken(authSvc), mediaCtrl.GetVoice)
+
+	// Avatar image (public read for <img src> — no secrets in file).
+	r.GET("/api/avatar/:user_id", authCtrl.GetAvatar)
 
 	// WebSocket (protected via query token)
 	r.GET("/ws", func(c *gin.Context) {

@@ -89,6 +89,7 @@ func main() {
 		log.Fatalf("Failed to init media storage: %v", err)
 	}
 	mediaCtrl := controller.NewMediaController(mediaSvc)
+	authCtrl.SetMedia(mediaSvc)
 
 	r := router.SetupRouter(chatCtrl, authCtrl, mediaCtrl, friendCtrl, groupCtrl, livekitCtrl, redPacketCtrl, authSvc)
 

@@ -50,14 +50,20 @@ export function parseRedPacketContent(content: string): {
 	total_amount?: number;
 	total_count?: number;
 	packet_type?: string;
+	target_user_ids?: string[];
 } {
 	try {
 		const o = JSON.parse(content) as Record<string, unknown>;
+		const rawTargets = o.target_user_ids;
+		const target_user_ids = Array.isArray(rawTargets)
+			? rawTargets.map((x) => String(x)).filter(Boolean)
+			: undefined;
 		return {
 			greeting: String(o.greeting ?? content),
 			total_amount: typeof o.total_amount === 'number' ? o.total_amount : undefined,
 			total_count: typeof o.total_count === 'number' ? o.total_count : undefined,
-			packet_type: typeof o.packet_type === 'string' ? o.packet_type : undefined
+			packet_type: typeof o.packet_type === 'string' ? o.packet_type : undefined,
+			target_user_ids
 		};
 	} catch {
 		return { greeting: content || '恭喜发财' };
@@ -81,6 +87,23 @@ export function canRecallMessage(msg: ChatMessage, myUserId: string, now = Date.
 	const ts = (msg.timestamp ?? 0) * 1000;
 	if (!ts) return false;
 	return now - ts <= RECALL_WINDOW_MS;
+}
+
+/**
+ * Avatar fallback text from username when no photo uploaded.
+ * - CJK / mixed: first 1–2 characters (e.g. 张三 → 张三, 王小明 → 王小)
+ * - Latin/ids: first 2 letters uppercased (e.g. bcd123 → BC)
+ */
+export function avatarInitials(name: string, maxChars = 2): string {
+	const s = (name || '').trim();
+	if (!s) return '?';
+	// Prefer grapheme-friendly split
+	const chars = Array.from(s);
+	// Pure ascii username / id
+	if (/^[a-zA-Z0-9_\-.]+$/.test(s)) {
+		return s.slice(0, Math.max(1, maxChars)).toUpperCase();
+	}
+	return chars.slice(0, Math.max(1, maxChars)).join('');
 }
 
 /** Format seconds as m:ss */

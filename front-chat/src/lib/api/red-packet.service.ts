@@ -9,10 +9,12 @@ export interface RedPacketClaim {
 
 export interface RedPacket {
 	id: string;
-	type: 'private' | 'group' | string;
+	type: 'private' | 'group' | 'designated' | string;
 	from_user_id: string;
 	to_user_id?: string;
 	group_id?: string;
+	/** Designated recipients (designated type only). */
+	target_user_ids?: string[];
 	total_amount: number;
 	total_count: number;
 	remaining_amount: number;
@@ -23,6 +25,8 @@ export interface RedPacket {
 	expires_at: number;
 	created_at: number;
 	my_claim_amount?: number;
+	/** Server hint: whether viewer may claim (designated). */
+	can_claim?: boolean;
 	claims?: RedPacketClaim[];
 }
 
@@ -40,9 +44,11 @@ export interface WalletInfo {
 }
 
 export interface CreateRedPacketBody {
-	type: 'private' | 'group';
+	type: 'private' | 'group' | 'designated';
 	peer_id?: string;
 	group_id?: string;
+	/** Required when type is designated. */
+	target_user_ids?: string[];
 	total_amount: number;
 	total_count?: number;
 	greeting?: string;

@@ -1702,24 +1702,37 @@ export function createChatController(opts: {
 		total_amount: number;
 		total_count?: number;
 		greeting?: string;
+		/** designated only */
+		type?: 'group' | 'designated';
+		target_user_ids?: string[];
 	}) {
 		const dest = conversationTarget();
 		if (!dest) throw new Error('Select a conversation first');
-		const body: CreateRedPacketBody =
-			chatMode === 'private'
-				? {
-						type: 'private',
-						peer_id: dest.peer,
-						total_amount: optsSend.total_amount,
-						greeting: optsSend.greeting
-					}
-				: {
-						type: 'group',
-						group_id: dest.g,
-						total_amount: optsSend.total_amount,
-						total_count: optsSend.total_count ?? 1,
-						greeting: optsSend.greeting
-					};
+		let body: CreateRedPacketBody;
+		if (chatMode === 'private') {
+			body = {
+				type: 'private',
+				peer_id: dest.peer,
+				total_amount: optsSend.total_amount,
+				greeting: optsSend.greeting
+			};
+		} else if (optsSend.type === 'designated') {
+			body = {
+				type: 'designated',
+				group_id: dest.g,
+				target_user_ids: optsSend.target_user_ids ?? [],
+				total_amount: optsSend.total_amount,
+				greeting: optsSend.greeting
+			};
+		} else {
+			body = {
+				type: 'group',
+				group_id: dest.g,
+				total_amount: optsSend.total_amount,
+				total_count: optsSend.total_count ?? 1,
+				greeting: optsSend.greeting
+			};
+		}
 		const res = await redPacketService.create(body);
 		const msg = res.message as ChatMessage;
 		if (msg && isChatContent(msg)) {

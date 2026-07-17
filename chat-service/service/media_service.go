@@ -4,6 +4,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"mime"
 	"os"
@@ -173,6 +177,135 @@ func (m *MediaService) ResolvePath(filename string) (string, error) {
 		return "", fmt.Errorf("not found")
 	}
 	return absPath, nil
+}
+
+const (
+	// MaxAvatarBytes 2 MiB.
+	MaxAvatarBytes = 2 << 20
+	// MinAvatarPixels rejects accidental solid 1×1 / 8×8 junk uploads.
+	MinAvatarPixels = 32
+)
+
+var allowedAvatarMIME = map[string]string{
+	"image/jpeg": ".jpg",
+	"image/jpg":  ".jpg",
+	"image/png":  ".png",
+	"image/webp": ".webp",
+	"image/gif":  ".gif",
+}
+
+// avatarDir returns MEDIA_DIR/avatars.
+func (m *MediaService) avatarDir() (string, error) {
+	dir := filepath.Join(m.dir, "avatars")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// SaveAvatar stores an image as avatars/{userID}{ext}, replacing previous files for that user.
+// Returns public path "/api/avatar/{userID}".
+func (m *MediaService) SaveAvatar(userID uint, r io.Reader, contentType string) (publicPath string, mimeType string, written int64, err error) {
+	mimeType = normalizeMIME(contentType)
+	ext, ok := allowedAvatarMIME[mimeType]
+	if !ok {
+		// Guess from common prefixes.
+		switch {
+		case strings.Contains(mimeType, "jpeg") || strings.Contains(mimeType, "jpg"):
+			ext, mimeType, ok = ".jpg", "image/jpeg", true
+		case strings.Contains(mimeType, "png"):
+			ext, mimeType, ok = ".png", "image/png", true
+		case strings.Contains(mimeType, "webp"):
+			ext, mimeType, ok = ".webp", "image/webp", true
+		case strings.Contains(mimeType, "gif"):
+			ext, mimeType, ok = ".gif", "image/gif", true
+		}
+	}
+	if !ok || ext == "" {
+		return "", "", 0, fmt.Errorf("unsupported image type %q (use jpeg/png/webp/gif)", contentType)
+	}
+
+	dir, err := m.avatarDir()
+	if err != nil {
+		return "", "", 0, err
+	}
+
+	// Remove any previous avatar for this user (any extension).
+	uid := fmt.Sprintf("%d", userID)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, uid+".") || name == uid {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
+
+	filename := uid + ext
+	path := filepath.Join(dir, filename)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("create avatar: %w", err)
+	}
+	defer f.Close()
+
+	limited := io.LimitReader(r, MaxAvatarBytes+1)
+	written, err = io.Copy(f, limited)
+	if err != nil {
+		_ = os.Remove(path)
+		return "", "", 0, fmt.Errorf("write avatar: %w", err)
+	}
+	if written == 0 {
+		_ = os.Remove(path)
+		return "", "", 0, fmt.Errorf("empty file")
+	}
+	if written > MaxAvatarBytes {
+		_ = os.Remove(path)
+		return "", "", 0, fmt.Errorf("file too large (max %d bytes)", MaxAvatarBytes)
+	}
+
+	// Reject tiny junk (e.g. 8×8 solid red PNG) that would look like a blank circle.
+	// webp may not decode with stdlib — skip dimension check if DecodeConfig fails.
+	if rf, err := os.Open(path); err == nil {
+		cfg, _, decErr := image.DecodeConfig(rf)
+		_ = rf.Close()
+		if decErr == nil {
+			if cfg.Width < MinAvatarPixels || cfg.Height < MinAvatarPixels {
+				_ = os.Remove(path)
+				return "", "", 0, fmt.Errorf("image too small (min %dx%d)", MinAvatarPixels, MinAvatarPixels)
+			}
+		}
+	}
+
+	publicPath = "/api/avatar/" + uid
+	return publicPath, mimeType, written, nil
+}
+
+// ResolveAvatarPath finds avatars/{userID}.* on disk.
+func (m *MediaService) ResolveAvatarPath(userID string) (absPath string, contentType string, err error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" || strings.Contains(userID, "..") || strings.ContainsAny(userID, "/\\") {
+		return "", "", fmt.Errorf("invalid user id")
+	}
+	dir, err := m.avatarDir()
+	if err != nil {
+		return "", "", err
+	}
+	for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif"} {
+		p := filepath.Join(dir, userID+ext)
+		if st, e := os.Stat(p); e == nil && !st.IsDir() {
+			ct := "image/jpeg"
+			switch ext {
+			case ".png":
+				ct = "image/png"
+			case ".webp":
+				ct = "image/webp"
+			case ".gif":
+				ct = "image/gif"
+			}
+			return p, ct, nil
+		}
+	}
+	return "", "", fmt.Errorf("not found")
 }
 
 // ContentTypeForFilename guesses Content-Type from extension.

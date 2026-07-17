@@ -17,9 +17,6 @@
 
 	const packetId = $derived(message.red_packet_id || '');
 	const parsed = $derived(parseRedPacketContent(message.content || ''));
-	const isGroup = $derived(
-		parsed.packet_type === 'group' || message.type === 'group' || !!message.group_id
-	);
 
 	let detail = $state<RedPacket | null>(null);
 	let loading = $state(false);
@@ -29,6 +26,21 @@
 	let open = $state(false);
 	/** short pulse when open button is pressed */
 	let opening = $state(false);
+
+	const isDesignated = $derived(
+		parsed.packet_type === 'designated' || detail?.type === 'designated'
+	);
+	const isGroup = $derived(
+		parsed.packet_type === 'group' ||
+			parsed.packet_type === 'designated' ||
+			message.type === 'group' ||
+			!!message.group_id
+	);
+	const typeLabel = $derived.by(() => {
+		if (isDesignated) return '指定红包';
+		if (isGroup) return '拼手气红包';
+		return '红包';
+	});
 
 	const myClaim = $derived(detail?.my_claim_amount || claimResult || 0);
 	const finished = $derived(
@@ -44,6 +56,7 @@
 		if (claimedByMe) return `已领取 ${myClaim} 币`;
 		if (detail?.status === 'refunded' || detail?.status === 'expired') return '已过期';
 		if (finished) return '已被领完';
+		if (isDesignated) return '指定红包';
 		if (isGroup) return '拼手气红包';
 		return '查看红包';
 	});
@@ -96,6 +109,11 @@
 		if ((detail.my_claim_amount ?? 0) > 0 || claimResult != null) return false;
 		if (detail.type === 'private' && detail.to_user_id !== myUserId) return false;
 		if (own && detail.type === 'private') return false;
+		if (detail.type === 'designated') {
+			if (detail.can_claim === false) return false;
+			const targets = detail.target_user_ids ?? parsed.target_user_ids ?? [];
+			if (targets.length > 0 && !targets.includes(myUserId)) return false;
+		}
 		return detail.remaining_count > 0;
 	});
 </script>
@@ -163,7 +181,7 @@
 						{parsed.greeting || '恭喜发财'}
 					</p>
 					<p class="mt-1 text-[11px] tracking-wider text-amber-100/85">
-						{isGroup ? '拼手气红包' : '红包'}
+						{typeLabel}
 						{#if openedLook}
 							· {statusLabel}
 						{/if}
@@ -268,7 +286,11 @@
 								class="mt-5 h-px w-24 bg-gradient-to-r from-transparent via-amber-300/60 to-transparent"
 							></div>
 							<p class="mt-4 text-[11px] text-white/70">
-								{isGroup ? '拼手气红包' : '私聊红包'}
+								{detail?.type === 'designated'
+									? '指定红包'
+									: isGroup
+										? '拼手气红包'
+										: '私聊红包'}
 								{#if detail}
 									· 共 {detail.total_amount} 币
 								{/if}
@@ -325,16 +347,23 @@
 							</button>
 							<p class="mt-5 text-xs tracking-widest text-amber-100/85">
 								{canClaim
-									? isGroup
-										? '拼手气 · 点击开红包'
-										: '点击开红包'
-									: own && !isGroup
+									? detail?.type === 'designated'
+										? '指定红包 · 点击开红包'
+										: isGroup
+											? '拼手气 · 点击开红包'
+											: '点击开红包'
+									: own && detail?.type === 'private'
 										? '等待对方领取'
-										: '无法领取'}
+										: detail?.type === 'designated' && detail.can_claim === false
+											? '未在指定名单中'
+											: '无法领取'}
 							</p>
-							{#if detail && isGroup}
+							{#if detail && (isGroup || detail.type === 'designated' || detail.type === 'group')}
 								<p class="mt-1 text-[11px] text-white/55">
 									剩余 {detail.remaining_count}/{detail.total_count} 个
+									{#if detail.type === 'designated' && detail.target_user_ids?.length}
+										· 指定 {detail.target_user_ids.length} 人
+									{/if}
 								</p>
 							{/if}
 						</div>
