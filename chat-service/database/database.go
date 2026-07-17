@@ -31,6 +31,7 @@ func Init() *gorm.DB {
 		&model.MessageRecord{},
 		&model.FriendRequest{},
 		&model.Friendship{},
+		&model.Blacklist{},
 		&model.Group{},
 		&model.GroupMember{},
 	); err != nil {

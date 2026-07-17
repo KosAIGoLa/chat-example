@@ -14,6 +14,7 @@ func SetupRouter(
 	mediaCtrl *controller.MediaController,
 	friendCtrl *controller.FriendController,
 	groupCtrl *controller.GroupController,
+	livekitCtrl *controller.LiveKitController,
 	authSvc *service.AuthService,
 ) *gin.Engine {
 	r := gin.Default()
@@ -46,7 +47,7 @@ func SetupRouter(
 		api.GET("/presence/:user_id", chatCtrl.GetPresence)
 		api.GET("/history", chatCtrl.GetMessageHistory)
 
-		// Friends (invite → accept → list)
+		// Friends (invite → accept → list → remove)
 		api.GET("/friends", friendCtrl.ListFriends)
 		api.GET("/friends/requests/incoming", friendCtrl.ListIncoming)
 		api.GET("/friends/requests/outgoing", friendCtrl.ListOutgoing)
@@ -55,8 +56,19 @@ func SetupRouter(
 		api.POST("/friends/requests/:id/reject", friendCtrl.RejectRequest)
 		api.DELETE("/friends/:user_id", friendCtrl.RemoveFriend)
 
+		// Blacklist (must be registered before /friends/:user_id if overlapping — static paths OK)
+		api.GET("/friends/blacklist", friendCtrl.ListBlacklist)
+		api.POST("/friends/blacklist", friendCtrl.BlockUser)
+		api.DELETE("/friends/blacklist/:user_id", friendCtrl.UnblockUser)
+
 		// Voice messages
 		api.POST("/voice", mediaCtrl.UploadVoice)
+
+		// LiveKit WebRTC (private call / group meeting)
+		if livekitCtrl != nil {
+			api.POST("/livekit/token", livekitCtrl.CreateToken)
+			api.POST("/livekit/signal", livekitCtrl.SignalCall)
+		}
 	}
 
 	// Voice playback: Authorization header OR ?token= (for <audio src>).

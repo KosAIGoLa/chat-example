@@ -39,6 +39,35 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # LiveKit SFU — WebRTC media for private calls & group meetings.
+  # Signaling: browser → :3000/rtc (nginx) → livekit:7880  (do NOT open :7880 in browser)
+  # Media: UDP 50000–50100 + TCP 7881 published on the host for ICE.
+  #
+  # LIVEKIT_NODE_IP = ICE address browsers must reach (NOT docker 172.x, NOT broken WAN).
+  #   localhost UI  → 127.0.0.1
+  #   LAN UI        → host LAN IP (e.g. 192.168.1.102)
+  livekit:
+    image: livekit/livekit-server:latest
+    command:
+      - --config
+      - /etc/livekit.yaml
+      - --node-ip
+      - ${LIVEKIT_NODE_IP:-127.0.0.1}
+    ports:
+      - "7880:7880"       # HTTP / WebSocket signaling (debug)
+      - "7881:7881"       # RTC over TCP fallback
+      - "50000-50100:50000-50100/udp"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped
+    healthcheck:
+      # Server exposes / on 7880; any HTTP response means process is up.
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:7880"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   # Go WebSocket chat backend (see ./chat-service)
   ws-server:
     build:
@@ -57,6 +86,11 @@ services:
       - JWT_SECRET=4e2d5fb9300d10a7d21d2fdb1e4d813fb9d55dff75d7a2c9d8b13ec61a99f3e0f26cb6d92efc5e5b29c4f0fcd54cfe758d49893c5d97a5d1d87d88bb6d6b8d42
       - MSG_CRYPTO_KEY=4YvS3j8M4wq2w2sQJv8S3JxQq7Q9iW4xQ6v9bW8H7nA
       - MEDIA_DIR=/app/data/voice
+      # LiveKit — API key/secret must match livekit.yaml `keys`
+      - LIVEKIT_API_KEY=devkey
+      - LIVEKIT_API_SECRET=secret_livekit_dev_change_me_32chars!!
+      # auto = same origin as page (ws://host:3000), nginx proxies /rtc → livekit:7880
+      - LIVEKIT_URL=auto
     volumes:
       - voice-data:/app/data/voice
     depends_on:
@@ -64,6 +98,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      livekit:
+        condition: service_started
     restart: unless-stopped
 
   # SvelteKit static frontend + nginx reverse proxy
@@ -77,6 +113,7 @@ services:
       - "3000:80"
     depends_on:
       - ws-server
+      - livekit
     restart: unless-stopped
 
 volumes:

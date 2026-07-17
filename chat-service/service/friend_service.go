@@ -63,34 +63,75 @@ func (s *FriendService) AreFriendsStr(a, b string) bool {
 	return s.AreFriends(ua, ub)
 }
 
-// SendRequest creates a pending invite from → to (by username or user id).
-func (s *FriendService) SendRequest(fromID uint, username, toUserIDStr string) (*dto.FriendRequestDTO, error) {
-	var to model.User
+// resolveUser finds a user by username or numeric id string.
+func (s *FriendService) resolveUser(username, userIDStr string) (*model.User, error) {
+	var u model.User
 	switch {
 	case username != "":
-		if err := s.db.Where("username = ?", username).First(&to).Error; err != nil {
+		if err := s.db.Where("username = ?", username).First(&u).Error; err != nil {
 			return nil, errors.New("user not found")
 		}
-	case toUserIDStr != "":
-		toID, err := parseUID(toUserIDStr)
+	case userIDStr != "":
+		id, err := parseUID(userIDStr)
 		if err != nil {
 			return nil, err
 		}
-		if err := s.db.First(&to, toID).Error; err != nil {
+		if err := s.db.First(&u, id).Error; err != nil {
 			return nil, errors.New("user not found")
 		}
 	default:
 		return nil, errors.New("username or user_id is required")
 	}
+	return &u, nil
+}
+
+// IsBlocked reports whether either side has blocked the other.
+func (s *FriendService) IsBlocked(a, b uint) bool {
+	if a == b {
+		return false
+	}
+	var n int64
+	s.db.Model(&model.Blacklist{}).
+		Where("(user_id = ? AND blocked_user_id = ?) OR (user_id = ? AND blocked_user_id = ?)", a, b, b, a).
+		Count(&n)
+	return n > 0
+}
+
+// IsBlockedStr is IsBlocked with string user ids.
+func (s *FriendService) IsBlockedStr(a, b string) bool {
+	ua, err1 := parseUID(a)
+	ub, err2 := parseUID(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return s.IsBlocked(ua, ub)
+}
+
+// IBlocked reports whether me blocked peer (one-way).
+func (s *FriendService) IBlocked(me, peer uint) bool {
+	var n int64
+	s.db.Model(&model.Blacklist{}).Where("user_id = ? AND blocked_user_id = ?", me, peer).Count(&n)
+	return n > 0
+}
+
+// SendRequest creates a pending invite from → to (by username or user id).
+func (s *FriendService) SendRequest(fromID uint, username, toUserIDStr string) (*dto.FriendRequestDTO, error) {
+	to, err := s.resolveUser(username, toUserIDStr)
+	if err != nil {
+		return nil, err
+	}
 	if to.ID == fromID {
 		return nil, errors.New("cannot invite yourself")
+	}
+	if s.IsBlocked(fromID, to.ID) {
+		return nil, errors.New("cannot invite: user is blocked")
 	}
 	if s.AreFriends(fromID, to.ID) {
 		return nil, errors.New("already friends")
 	}
 
 	var existing model.FriendRequest
-	err := s.db.Where(
+	err = s.db.Where(
 		"((from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)) AND status = ?",
 		fromID, to.ID, to.ID, fromID, model.FriendPending,
 	).First(&existing).Error
@@ -132,6 +173,9 @@ func (s *FriendService) AcceptRequest(me uint, requestID uint) (*dto.FriendReque
 	}
 	if req.Status != model.FriendPending {
 		return nil, fmt.Errorf("request is already %s", req.Status)
+	}
+	if s.IsBlocked(me, req.FromUserID) {
+		return nil, errors.New("cannot accept: user is blocked")
 	}
 	req.Status = model.FriendAccepted
 	if err := s.db.Save(&req).Error; err != nil {
@@ -235,20 +279,125 @@ func (s *FriendService) ListOutgoing(me uint) ([]dto.FriendRequestDTO, error) {
 	return s.mapRequests(rows)
 }
 
-// RemoveFriend deletes the friendship pair.
-func (s *FriendService) RemoveFriend(me, peer uint) error {
+// RemoveFriend deletes the friendship pair and cleans request rows.
+// Returns peer user id string for live notify.
+func (s *FriendService) RemoveFriend(me, peer uint) (peerID string, err error) {
 	if me == peer {
-		return errors.New("invalid peer")
+		return "", errors.New("invalid peer")
 	}
 	ua, ub := orderedPair(me, peer)
 	res := s.db.Where("user_a_id = ? AND user_b_id = ?", ua, ub).Delete(&model.Friendship{})
 	if res.Error != nil {
+		return "", res.Error
+	}
+	if res.RowsAffected == 0 {
+		return "", errors.New("not friends")
+	}
+	// Clear any friend_request rows between the pair so they can re-invite.
+	_ = s.db.Where(
+		"(from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)",
+		me, peer, peer, me,
+	).Delete(&model.FriendRequest{}).Error
+	return uidStr(peer), nil
+}
+
+// BlockUser adds peer to my blacklist, removes friendship, and cancels pending invites.
+func (s *FriendService) BlockUser(me uint, username, userIDStr string) (*dto.BlacklistUserDTO, error) {
+	peer, err := s.resolveUser(username, userIDStr)
+	if err != nil {
+		return nil, err
+	}
+	if peer.ID == me {
+		return nil, errors.New("cannot block yourself")
+	}
+	if s.IBlocked(me, peer.ID) {
+		return s.toBlacklistDTO(me, peer.ID)
+	}
+	// Drop friendship if any.
+	ua, ub := orderedPair(me, peer.ID)
+	_ = s.db.Where("user_a_id = ? AND user_b_id = ?", ua, ub).Delete(&model.Friendship{})
+	// Drop pending/any requests either way.
+	_ = s.db.Where(
+		"(from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)",
+		me, peer.ID, peer.ID, me,
+	).Delete(&model.FriendRequest{}).Error
+
+	row := model.Blacklist{UserID: me, BlockedUserID: peer.ID}
+	if err := s.db.Create(&row).Error; err != nil {
+		return nil, err
+	}
+	return &dto.BlacklistUserDTO{
+		UserID:    uidStr(peer.ID),
+		Username:  peer.Username,
+		CreatedAt: row.CreatedAt.Unix(),
+	}, nil
+}
+
+// UnblockUser removes peer from my blacklist.
+func (s *FriendService) UnblockUser(me, peer uint) error {
+	if me == peer {
+		return errors.New("invalid peer")
+	}
+	res := s.db.Where("user_id = ? AND blocked_user_id = ?", me, peer).Delete(&model.Blacklist{})
+	if res.Error != nil {
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		return errors.New("not friends")
+		return errors.New("user is not in your blacklist")
 	}
 	return nil
+}
+
+// ListBlacklist returns users I blocked.
+func (s *FriendService) ListBlacklist(me uint) ([]dto.BlacklistUserDTO, error) {
+	var rows []model.Blacklist
+	if err := s.db.Where("user_id = ?", me).Order("created_at desc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return []dto.BlacklistUserDTO{}, nil
+	}
+	ids := make([]uint, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.BlockedUserID)
+	}
+	var users []model.User
+	_ = s.db.Where("id IN ?", ids).Find(&users).Error
+	byID := make(map[uint]model.User, len(users))
+	for _, u := range users {
+		byID[u.ID] = u
+	}
+	out := make([]dto.BlacklistUserDTO, 0, len(rows))
+	for _, r := range rows {
+		name := uidStr(r.BlockedUserID)
+		if u, ok := byID[r.BlockedUserID]; ok {
+			name = u.Username
+		}
+		out = append(out, dto.BlacklistUserDTO{
+			UserID:    uidStr(r.BlockedUserID),
+			Username:  name,
+			CreatedAt: r.CreatedAt.Unix(),
+		})
+	}
+	return out, nil
+}
+
+func (s *FriendService) toBlacklistDTO(me, peerID uint) (*dto.BlacklistUserDTO, error) {
+	var row model.Blacklist
+	if err := s.db.Where("user_id = ? AND blocked_user_id = ?", me, peerID).First(&row).Error; err != nil {
+		return nil, err
+	}
+	var u model.User
+	_ = s.db.First(&u, peerID).Error
+	name := u.Username
+	if name == "" {
+		name = uidStr(peerID)
+	}
+	return &dto.BlacklistUserDTO{
+		UserID:    uidStr(peerID),
+		Username:  name,
+		CreatedAt: row.CreatedAt.Unix(),
+	}, nil
 }
 
 func (s *FriendService) mapRequests(rows []model.FriendRequest) ([]dto.FriendRequestDTO, error) {

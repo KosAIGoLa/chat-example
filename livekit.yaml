@@ -1,0 +1,29 @@
+# LiveKit server config (dev). Keys must match LIVEKIT_API_KEY / LIVEKIT_API_SECRET.
+port: 7880
+bind_addresses:
+  - ""
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  # Do NOT use STUN public IP for local Docker — browser on localhost/LAN
+  # cannot reach WAN candidates (hairpin NAT fails → "could not establish pc connection").
+  # Advertised ICE IP is set by docker-compose --node-ip (host-reachable address).
+  use_external_ip: false
+  # Allow TCP 7881 when UDP is blocked (Docker Desktop / strict networks).
+  allow_tcp_fallback: true
+
+redis: null
+
+keys:
+  # >= 32 chars required by newer LiveKit
+  devkey: secret_livekit_dev_change_me_32chars!!
+
+logging:
+  level: info
+
+room:
+  auto_create: true
+  empty_timeout: 300
+  max_participants: 50

@@ -18,6 +18,8 @@ import type {
 	ChatMessage,
 	ChatMode,
 	ConnectionStatus,
+	BlacklistUser,
+	CallEvent,
 	FriendEvent,
 	FriendRequest,
 	FriendUser,
@@ -118,6 +120,8 @@ export function createChatController(opts: {
 	token: string;
 	userId: string;
 	onUnauthorized?: () => void;
+	/** LiveKit call signaling events from the chat WebSocket. */
+	onCallEvent?: (ev: CallEvent) => void;
 }) {
 	let ws: WebSocket | null = null;
 	let messages = $state<ChatMessage[]>([]);
@@ -134,6 +138,8 @@ export function createChatController(opts: {
 	let friends = $state<FriendUser[]>([]);
 	/** Incoming friend invites waiting for my accept/reject. */
 	let incomingRequests = $state<FriendRequest[]>([]);
+	/** Users I blocked. */
+	let blacklist = $state<BlacklistUser[]>([]);
 	/** Members of the currently selected group (never includes self). */
 	let groupMembers = $state<OnlineUser[]>([]);
 	/** user_id → username cache for titles / labels. */
@@ -424,6 +430,7 @@ export function createChatController(opts: {
 		void refreshOnlineUsers();
 		void refreshFriends();
 		void refreshIncomingRequests();
+		void refreshBlacklist();
 		void refreshMyGroups();
 
 		// Re-join groups so membership survives disconnect / refresh.
@@ -607,7 +614,12 @@ export function createChatController(opts: {
 						applyRecall((raw as RecallEvent).id);
 						return;
 					}
-					// Friend invite / accept.
+					// WebRTC call signaling (media on LiveKit).
+					if ('type' in raw && raw.type === 'call') {
+						opts.onCallEvent?.(raw as CallEvent);
+						return;
+					}
+					// Friend invite / accept / remove / block.
 					if ('type' in raw && raw.type === 'friend_event') {
 						const fe = raw as FriendEvent;
 						if (fe.action === 'request') {
@@ -616,7 +628,18 @@ export function createChatController(opts: {
 							void refreshFriends();
 							void refreshIncomingRequests();
 						} else if (fe.action === 'rejected') {
-							// optional toast
+							void refreshIncomingRequests();
+						} else if (fe.action === 'removed' || fe.action === 'blocked') {
+							void refreshFriends();
+							void refreshIncomingRequests();
+							void refreshBlacklist();
+							// Close private chat if peer was removed/blocked.
+							const peer =
+								fe.from_user_id === myUserId ? fe.to_user_id : fe.from_user_id;
+							if (peer && chatMode === 'private' && targetUser === peer) {
+								messages = [];
+								targetUser = '';
+							}
 						}
 						return;
 					}
@@ -823,6 +846,39 @@ export function createChatController(opts: {
 			messages = [];
 			targetUser = '';
 		}
+	}
+
+	async function refreshBlacklist() {
+		try {
+			const res = await friendService.listBlacklist();
+			blacklist = res.blacklist ?? [];
+			for (const u of blacklist) {
+				rememberUsers([{ user_id: u.user_id, username: u.username }]);
+			}
+		} catch {
+			// ignore
+		}
+	}
+
+	/** 拉黑：解除好友 + 进黑名单 */
+	async function blockUser(opts: { user_id?: string; username?: string }) {
+		const entry = await friendService.block(opts);
+		const uid = entry.user_id;
+		friends = friends.filter((f) => f.user_id !== uid);
+		incomingRequests = incomingRequests.filter(
+			(r) => r.from_user_id !== uid && r.to_user_id !== uid
+		);
+		await refreshBlacklist();
+		if (chatMode === 'private' && targetUser === uid) {
+			messages = [];
+			targetUser = '';
+		}
+		return entry;
+	}
+
+	async function unblockUser(userId: string) {
+		await friendService.unblock(userId);
+		blacklist = blacklist.filter((u) => u.user_id !== userId);
 	}
 
 	async function reloadActiveHistory() {
@@ -1246,6 +1302,9 @@ export function createChatController(opts: {
 		get incomingRequests() {
 			return incomingRequests;
 		},
+		get blacklist() {
+			return blacklist;
+		},
 		get groupMembers() {
 			return groupMembers;
 		},
@@ -1277,6 +1336,9 @@ export function createChatController(opts: {
 		acceptFriendRequest,
 		rejectFriendRequest,
 		removeFriend,
+		refreshBlacklist,
+		blockUser,
+		unblockUser,
 		sendMessage,
 		sendVoiceMessage,
 		recallMessage,

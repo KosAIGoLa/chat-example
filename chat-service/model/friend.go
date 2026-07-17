@@ -26,3 +26,12 @@ type Friendship struct {
 	UserBID   uint      `gorm:"index;not null;uniqueIndex:idx_friendship_pair" json:"user_b_id"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+// Blacklist is one-way: UserID blocked BlockedUserID.
+// Blocks friend invites and private messages in both directions while active.
+type Blacklist struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	UserID        uint      `gorm:"index;not null;uniqueIndex:idx_blacklist_pair" json:"user_id"`
+	BlockedUserID uint      `gorm:"index;not null;uniqueIndex:idx_blacklist_pair" json:"blocked_user_id"`
+	CreatedAt     time.Time `json:"created_at"`
+}

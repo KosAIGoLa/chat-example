@@ -189,9 +189,15 @@ func (s *ChatService) sendPrivate(client *model.Client, msg *dto.ChatMessageDTO)
 	if msg.To == "" {
 		return
 	}
-	if s.friends != nil && !s.friends.AreFriendsStr(msg.From, msg.To) {
-		s.sendError(client, "not_friends", "You can only message accepted friends")
-		return
+	if s.friends != nil {
+		if s.friends.IsBlockedStr(msg.From, msg.To) {
+			s.sendError(client, "blocked", "Cannot message: user is blocked")
+			return
+		}
+		if !s.friends.AreFriendsStr(msg.From, msg.To) {
+			s.sendError(client, "not_friends", "You can only message accepted friends")
+			return
+		}
 	}
 	s.ensureMessageID(msg)
 	if err := s.nats.PublishPrivate(msg); err != nil {

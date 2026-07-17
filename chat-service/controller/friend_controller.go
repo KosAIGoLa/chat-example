@@ -136,16 +136,79 @@ func (ctrl *FriendController) RejectRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "request rejected", Data: req})
 }
 
-// RemoveFriend DELETE /api/friends/:user_id
+// RemoveFriend DELETE /api/friends/:user_id — 解除好友关系
 func (ctrl *FriendController) RemoveFriend(c *gin.Context) {
 	peer, err := strconv.ParseUint(c.Param("user_id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "invalid user_id"})
 		return
 	}
-	if err := ctrl.friends.RemoveFriend(ctrl.me(c), uint(peer)); err != nil {
+	me := ctrl.me(c)
+	peerID, err := ctrl.friends.RemoveFriend(me, uint(peer))
+	if err != nil {
 		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
 	}
+	meStr := strconv.FormatUint(uint64(me), 10)
+	ev := dto.FriendEvent{
+		Action:     "removed",
+		FromUserID: meStr,
+		ToUserID:   peerID,
+	}
+	ctrl.friends.PushFriendEvent(meStr, ev)
+	ctrl.friends.PushFriendEvent(peerID, ev)
 	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "friend removed"})
+}
+
+// ListBlacklist GET /api/friends/blacklist
+func (ctrl *FriendController) ListBlacklist(c *gin.Context) {
+	list, err := ctrl.friends.ListBlacklist(ctrl.me(c))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, dto.APIResponseDTO{Code: 500, Message: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, dto.APIResponseDTO{
+		Code: 200, Message: "success",
+		Data: gin.H{"blacklist": list, "count": len(list)},
+	})
+}
+
+// BlockUser POST /api/friends/blacklist  {username|user_id}
+// 拉黑：解除好友 + 取消双向邀请 + 禁止私聊/邀请
+func (ctrl *FriendController) BlockUser(c *gin.Context) {
+	var body dto.BlockUserRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "invalid body"})
+		return
+	}
+	me := ctrl.me(c)
+	entry, err := ctrl.friends.BlockUser(me, body.Username, body.UserID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+	meStr := strconv.FormatUint(uint64(me), 10)
+	ev := dto.FriendEvent{
+		Action:     "blocked",
+		FromUserID: meStr,
+		ToUserID:   entry.UserID,
+	}
+	// Notify both sides to refresh friend lists (blocked user loses friendship).
+	ctrl.friends.PushFriendEvent(meStr, ev)
+	ctrl.friends.PushFriendEvent(entry.UserID, ev)
+	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "user blocked", Data: entry})
+}
+
+// UnblockUser DELETE /api/friends/blacklist/:user_id
+func (ctrl *FriendController) UnblockUser(c *gin.Context) {
+	peer, err := strconv.ParseUint(c.Param("user_id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "invalid user_id"})
+		return
+	}
+	if err := ctrl.friends.UnblockUser(ctrl.me(c), uint(peer)); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "user unblocked"})
 }

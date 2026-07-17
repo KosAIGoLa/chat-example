@@ -12,9 +12,12 @@ export { default as GroupMembersPanel } from './components/GroupMembersPanel.sve
 export { default as MessageList } from './components/MessageList.svelte';
 export { default as MessageBubble } from './components/MessageBubble.svelte';
 export { default as MessageInput } from './components/MessageInput.svelte';
+export { default as CallPanel } from './components/CallPanel.svelte';
 
 export { createChatController } from './chat.svelte';
 export type { ChatController } from './chat.svelte';
+export { createCallController } from './call.svelte';
+export type { CallController } from './call.svelte';
 
 export { formatDuration, formatMessageLabel, isOwnMessage, isVoiceMessage } from './utils';
 export {

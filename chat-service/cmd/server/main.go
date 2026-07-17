@@ -65,6 +65,10 @@ func main() {
 	friendCtrl := controller.NewFriendController(friendSvc)
 	groupCtrl := controller.NewGroupController(groupSvc)
 
+	// LiveKit WebRTC tokens (private call + group meeting)
+	lkSvc := service.NewLiveKitService()
+	livekitCtrl := controller.NewLiveKitController(lkSvc, hub, friendSvc, groupSvc)
+
 	// Voice media storage
 	mediaDir := os.Getenv("MEDIA_DIR")
 	if mediaDir == "" {
@@ -76,9 +80,10 @@ func main() {
 	}
 	mediaCtrl := controller.NewMediaController(mediaSvc)
 
-	r := router.SetupRouter(chatCtrl, authCtrl, mediaCtrl, friendCtrl, groupCtrl, authSvc)
+	r := router.SetupRouter(chatCtrl, authCtrl, mediaCtrl, friendCtrl, groupCtrl, livekitCtrl, authSvc)
 
-	log.Printf("Server starting on %s (NATS: %s, media: %s, msg-crypto: AES-GCM)", addr, natsURL, mediaDir)
+	log.Printf("Server starting on %s (NATS: %s, media: %s, msg-crypto: AES-GCM, livekit: %s)",
+		addr, natsURL, mediaDir, lkSvc.URL())
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}

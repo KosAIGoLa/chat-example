@@ -1,5 +1,12 @@
 <script lang="ts">
-	import type { ChatMode, FriendRequest, FriendUser, GroupInfo, OnlineUser } from '../types';
+	import type {
+		BlacklistUser,
+		ChatMode,
+		FriendRequest,
+		FriendUser,
+		GroupInfo,
+		OnlineUser
+	} from '../types';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Badge } from '$lib/components/ui/badge';
@@ -17,6 +24,10 @@
 	import Plus from '@lucide/svelte/icons/plus';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import Crown from '@lucide/svelte/icons/crown';
+	import Ban from '@lucide/svelte/icons/ban';
+	import ShieldOff from '@lucide/svelte/icons/shield-off';
+	import Phone from '@lucide/svelte/icons/phone';
+	import Video from '@lucide/svelte/icons/video';
 
 	interface Props {
 		chatMode: ChatMode;
@@ -28,6 +39,8 @@
 		friends: FriendUser[];
 		/** Pending invites I received. */
 		incomingRequests: FriendRequest[];
+		/** Users I blocked. */
+		blacklist?: BlacklistUser[];
 		/** Global online users (optional browse). */
 		onlineUsers: OnlineUser[];
 		myUserId: string;
@@ -45,6 +58,15 @@
 		onAcceptRequest: (id: number) => Promise<void>;
 		onRejectRequest: (id: number) => Promise<void>;
 		onRemoveFriend: (userId: string) => Promise<void>;
+		onBlockUser: (opts: { user_id?: string; username?: string }) => Promise<void>;
+		onUnblockUser: (userId: string) => Promise<void>;
+		/** Start a private LiveKit call with this friend. media: audio | video */
+		onCallUser?: (
+			userId: string,
+			username?: string,
+			media?: 'audio' | 'video'
+		) => void | Promise<void>;
+		callDisabled?: boolean;
 	}
 
 	let {
@@ -55,6 +77,7 @@
 		groupMeta = {},
 		friends,
 		incomingRequests,
+		blacklist = [],
 		onlineUsers,
 		myUserId,
 		unreadPeers = {},
@@ -70,7 +93,11 @@
 		onInviteFriend,
 		onAcceptRequest,
 		onRejectRequest,
-		onRemoveFriend
+		onRemoveFriend,
+		onBlockUser,
+		onUnblockUser,
+		onCallUser,
+		callDisabled = false
 	}: Props = $props();
 
 	let joinGroupInput = $state('');
@@ -84,8 +111,11 @@
 	let inviteOk = $state('');
 
 	const friendIds = $derived(new Set(friends.map((f) => f.user_id)));
+	const blockedIds = $derived(new Set(blacklist.map((u) => u.user_id)));
 	const othersOnline = $derived(
-		onlineUsers.filter((u) => u.user_id !== myUserId && !friendIds.has(u.user_id))
+		onlineUsers.filter(
+			(u) => u.user_id !== myUserId && !friendIds.has(u.user_id) && !blockedIds.has(u.user_id)
+		)
 	);
 
 	function handleJoin() {
@@ -310,14 +340,63 @@
 									>{u.username || u.user_id}</span
 								>
 							</button>
+							{#if onCallUser}
+								<Button
+									variant="ghost"
+									size="icon-xs"
+									class="text-primary hover:text-primary opacity-80 group-hover:opacity-100"
+									title="语音通话"
+									disabled={callDisabled}
+									onclick={(e) => {
+										e.stopPropagation();
+										void onCallUser(u.user_id, u.username, 'audio');
+									}}
+								>
+									<Phone class="size-3.5" />
+								</Button>
+								<Button
+									variant="ghost"
+									size="icon-xs"
+									class="text-primary hover:text-primary opacity-80 group-hover:opacity-100"
+									title="视讯通话"
+									disabled={callDisabled}
+									onclick={(e) => {
+										e.stopPropagation();
+										void onCallUser(u.user_id, u.username, 'video');
+									}}
+								>
+									<Video class="size-3.5" />
+								</Button>
+							{/if}
 							<Button
 								variant="ghost"
 								size="icon-xs"
 								class="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100"
-								title="Remove friend"
-								onclick={() => void onRemoveFriend(u.user_id)}
+								title="解除好友"
+								onclick={() => {
+									if (confirm(`解除与 ${u.username || u.user_id} 的好友关系？`)) {
+										void onRemoveFriend(u.user_id);
+									}
+								}}
 							>
 								<UserMinus class="size-3.5" />
+							</Button>
+							<Button
+								variant="ghost"
+								size="icon-xs"
+								class="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100"
+								title="拉黑"
+								onclick={() => {
+									if (
+										confirm(
+											`拉黑 ${u.username || u.user_id}？将解除好友，且无法互相邀请/私聊。`
+										)
+									) {
+										void onBlockUser({ user_id: u.user_id });
+									}
+								}}
+							>
+								<Ban class="size-3.5" />
 							</Button>
 						</li>
 					{:else}
@@ -334,12 +413,12 @@
 						</p>
 						<p class="text-muted-foreground/80 text-[10px]">Invite them to chat privately</p>
 					</div>
-					<ul class="space-y-0.5 px-2 pb-4">
+					<ul class="space-y-0.5 px-2 pb-2">
 						{#each othersOnline as u (u.user_id)}
-							<li>
+							<li class="group flex items-center gap-0.5">
 								<button
 									type="button"
-									class="hover:bg-sidebar-accent flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm opacity-80"
+									class="hover:bg-sidebar-accent flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm opacity-80"
 									onclick={() => {
 										inviteUsername = u.username || u.user_id;
 									}}
@@ -349,6 +428,48 @@
 									></span>
 									<span class="truncate">{u.username || u.user_id}</span>
 								</button>
+								<Button
+									variant="ghost"
+									size="icon-xs"
+									class="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100"
+									title="拉黑"
+									onclick={() => {
+										if (confirm(`拉黑 ${u.username || u.user_id}？`)) {
+											void onBlockUser({ user_id: u.user_id, username: u.username });
+										}
+									}}
+								>
+									<Ban class="size-3.5" />
+								</Button>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+
+				{#if blacklist.length > 0}
+					<div class="px-4 pt-2 pb-1">
+						<p class="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+							Blacklist · {blacklist.length}
+						</p>
+					</div>
+					<ul class="space-y-0.5 px-2 pb-4">
+						{#each blacklist as u (u.user_id)}
+							<li class="group flex items-center gap-0.5">
+								<span
+									class="text-muted-foreground flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-sm"
+								>
+									<Ban class="size-3.5 shrink-0 opacity-70" />
+									<span class="truncate">{u.username || u.user_id}</span>
+								</span>
+								<Button
+									variant="ghost"
+									size="icon-xs"
+									class="text-muted-foreground hover:text-emerald-600 opacity-0 group-hover:opacity-100"
+									title="取消拉黑"
+									onclick={() => void onUnblockUser(u.user_id)}
+								>
+									<ShieldOff class="size-3.5" />
+								</Button>
 							</li>
 						{/each}
 					</ul>

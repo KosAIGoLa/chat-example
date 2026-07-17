@@ -80,12 +80,37 @@ export interface FriendRequest {
 
 export interface FriendEvent {
 	type: 'friend_event';
-	action: 'request' | 'accepted' | 'rejected' | string;
+	action: 'request' | 'accepted' | 'rejected' | 'removed' | 'blocked' | string;
 	request_id?: number;
 	from_user_id?: string;
 	from_username?: string;
 	to_user_id?: string;
 	to_username?: string;
+}
+
+/** One entry in my blacklist. */
+export interface BlacklistUser {
+	user_id: string;
+	username: string;
+	created_at: number;
+}
+
+/** audio = 语音通话, video = 视讯通话 */
+export type CallMedia = 'audio' | 'video';
+
+/** WebRTC call signaling over chat WebSocket (media is LiveKit). */
+export interface CallEvent {
+	type: 'call';
+	action: 'invite' | 'accept' | 'reject' | 'end' | 'cancel' | string;
+	room: string;
+	call_type: 'private' | 'group' | string;
+	/** audio = voice only; video = camera + mic */
+	media?: CallMedia | string;
+	from: string;
+	from_name?: string;
+	to?: string;
+	group_id?: string;
+	timestamp?: number;
 }
 
 export interface CryptoKeyResponse {

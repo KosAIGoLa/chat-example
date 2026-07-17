@@ -14,6 +14,8 @@ export { friendService } from './friend.service';
 export { groupService } from './group.service';
 export { chatService } from './chat.service';
 export { mediaService, buildMediaUrl } from './media.service';
+export { livekitService } from './livekit.service';
+export type { CallType, CallSignalPayload, LiveKitTokenResponse } from './livekit.service';
 export { buildWsUrl } from './ws';
 
 import { authService } from './auth.service';
@@ -47,6 +49,9 @@ export const api = {
 	acceptFriendRequest: friendService.accept,
 	rejectFriendRequest: friendService.reject,
 	removeFriend: friendService.remove,
+	listBlacklist: friendService.listBlacklist,
+	blockUser: friendService.block,
+	unblockUser: friendService.unblock,
 
 	// groups
 	createGroup: groupService.create,
