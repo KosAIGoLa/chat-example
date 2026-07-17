@@ -2,6 +2,8 @@
 
 Chat stack monorepo: Go backend and Svelte frontend are separate projects.
 
+![screen](screen/img.png)
+
 ```
 ws-ex/
 ├── chat-service/   # Go WebSocket chat API (module: ws-ex)
