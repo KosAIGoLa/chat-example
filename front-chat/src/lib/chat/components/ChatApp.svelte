@@ -33,7 +33,7 @@
 				? `Private · ${chat.displayName(targetUser)}`
 				: 'Private chat'
 			: groupId
-				? `#${groupId}`
+				? `#${chat.groupDisplayName(groupId)}`
 				: 'Group chat'
 	);
 
@@ -114,6 +114,9 @@
 			bind:targetUser
 			bind:groupId
 			joinedGroups={chat.joinedGroups}
+			groupMeta={chat.groupMeta}
+			friends={chat.friends}
+			incomingRequests={chat.incomingRequests}
 			onlineUsers={chat.onlineUsers}
 			myUserId={chat.myUserId}
 			unreadPeers={chat.unreadPeers}
@@ -124,9 +127,31 @@
 					groupId = chat.groupId;
 				});
 			}}
+			onCreateGroup={async (name, customId) => {
+				const g = await chat.createGroup(name, customId);
+				groupId = g.id;
+			}}
+			onDissolveGroup={async (g) => {
+				await chat.dissolveGroup(g);
+				groupId = chat.groupId;
+			}}
 			onSelectGroup={selectGroup}
 			onSelectUser={selectUser}
 			onRefreshOnline={() => chat.refreshOnlineUsers()}
+			onRefreshFriends={() => chat.refreshFriends()}
+			onInviteFriend={async (name) => {
+				await chat.inviteFriend(name);
+			}}
+			onAcceptRequest={async (id) => {
+				await chat.acceptFriendRequest(id);
+			}}
+			onRejectRequest={async (id) => {
+				await chat.rejectFriendRequest(id);
+			}}
+			onRemoveFriend={async (uid) => {
+				await chat.removeFriend(uid);
+				if (targetUser === uid) targetUser = '';
+			}}
 		/>
 
 		<!-- Col 2: group members (only in Group mode) — to the right of groups -->
@@ -164,6 +189,7 @@
 				messages={chat.messages}
 				myUserId={chat.myUserId}
 				loading={chat.historyLoading}
+				onRecall={(msg) => void chat.recallMessage(msg)}
 			/>
 			<MessageInput
 				chatMode={chat.chatMode}

@@ -8,9 +8,10 @@
 		messages: ChatMessage[];
 		myUserId: string;
 		loading?: boolean;
+		onRecall?: (msg: ChatMessage) => void;
 	}
 
-	let { messages, myUserId, loading = false }: Props = $props();
+	let { messages, myUserId, loading = false, onRecall }: Props = $props();
 	let bottomEl: HTMLDivElement | undefined = $state();
 
 	$effect(() => {
@@ -48,8 +49,8 @@
 					</div>
 				</div>
 			{:else}
-				{#each messages as msg, i (`${msg.timestamp ?? 0}-${msg.from}-${msg.to}-${msg.media_url ?? ''}-${msg.content}-${i}`)}
-					<MessageBubble message={msg} {myUserId} />
+				{#each messages as msg, i (`${msg.id ?? ''}-${msg.timestamp ?? 0}-${msg.from}-${msg.to}-${msg.media_url ?? ''}-${msg.content}-${i}`)}
+					<MessageBubble message={msg} {myUserId} {onRecall} />
 				{/each}
 			{/if}
 			<div bind:this={bottomEl} class="h-px w-full shrink-0"></div>

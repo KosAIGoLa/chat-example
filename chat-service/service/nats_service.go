@@ -111,6 +111,12 @@ func NewNATSService(url string, hub *Hub) (*NATSService, error) {
 		return nil, fmt.Errorf("nats subscribe presence: %w", err)
 	}
 
+	// Cross-instance recall / control events (not stored in JetStream history).
+	_, err = nc.Subscribe("chat.event.>", ns.handleChatEvent)
+	if err != nil {
+		return nil, fmt.Errorf("nats subscribe chat events: %w", err)
+	}
+
 	// --- Request/Reply: inter-service RPC ---
 	_, err = nc.Subscribe(rpcSubject, ns.handleRPC)
 	if err != nil {
@@ -157,6 +163,45 @@ func (ns *NATSService) PublishGroup(msg *dto.ChatMessageDTO) error {
 	return nil
 }
 
+// PublishEvent publishes a Core NATS event that is NOT captured by JetStream (outside chat.>).
+func (ns *NATSService) PublishEvent(subject string, data []byte) error {
+	return ns.nc.Publish(subject, data)
+}
+
+// handleChatEvent fans out control frames (e.g. recall) to local clients.
+func (ns *NATSService) handleChatEvent(m *nats.Msg) {
+	var peek struct {
+		Type    string `json:"type"`
+		ID      string `json:"id"`
+		From    string `json:"from"`
+		To      string `json:"to"`
+		GroupID string `json:"group_id"`
+	}
+	if err := json.Unmarshal(m.Data, &peek); err != nil {
+		return
+	}
+	switch peek.Type {
+	case "recall":
+		if peek.GroupID != "" {
+			for _, c := range ns.hub.GetGroupMembers(peek.GroupID) {
+				select {
+				case c.Send <- m.Data:
+				default:
+				}
+			}
+			return
+		}
+		if peek.From != "" {
+			ns.hub.DeliverToUser(peek.From, m.Data)
+		}
+		if peek.To != "" {
+			ns.hub.DeliverToUser(peek.To, m.Data)
+		}
+	default:
+		// ignore unknown events
+	}
+}
+
 // handlePrivateMessage is the NATS subscription handler for private messages.
 // It delivers the message to the local client if they are connected to this instance.
 func (ns *NATSService) handlePrivateMessage(m *nats.Msg) {
@@ -166,17 +211,11 @@ func (ns *NATSService) handlePrivateMessage(m *nats.Msg) {
 		return
 	}
 
-	client, ok := ns.hub.GetClient(msg.To)
-	if !ok {
-		// Target user is not on this instance — ignore.
-		return
-	}
-
 	data, _ := json.Marshal(msg)
-	select {
-	case client.Send <- data:
-	default:
-		log.Printf("[NATS] client %s send buffer full, dropping private message", msg.To)
+	// Deliver to every local tab/connection for the recipient.
+	if !ns.hub.DeliverToUser(msg.To, data) {
+		// Target user is not on this instance (or all buffers full) — ignore.
+		return
 	}
 }
 
@@ -196,9 +235,12 @@ func (ns *NATSService) handleGroupMessage(m *nats.Msg) {
 
 	members := ns.hub.GetGroupMembers(groupID)
 	data, _ := json.Marshal(msg)
+	// System notices (join/leave) are delivered to everyone including the actor.
+	// Normal chat messages skip the sender (optimistic local echo on client).
+	isSystem := msg.ContentType == "system"
 	for _, client := range members {
-		if client.UserID == msg.From {
-			continue // don't echo back to sender
+		if !isSystem && client.UserID == msg.From {
+			continue
 		}
 		select {
 		case client.Send <- data:
@@ -422,18 +464,12 @@ func (ns *NATSService) handleRPC(m *nats.Msg) {
 			ns.reply(m, dto.RPCResponse{Success: false, Error: err.Error()})
 			return
 		}
-		client, ok := ns.hub.GetClient(msg.To)
-		if !ok {
+		data, _ := json.Marshal(msg)
+		if !ns.hub.DeliverToUser(msg.To, data) {
 			ns.reply(m, dto.RPCResponse{Success: false, Error: "user not on this instance"})
 			return
 		}
-		data, _ := json.Marshal(msg)
-		select {
-		case client.Send <- data:
-			ns.reply(m, dto.RPCResponse{Success: true})
-		default:
-			ns.reply(m, dto.RPCResponse{Success: false, Error: "client buffer full"})
-		}
+		ns.reply(m, dto.RPCResponse{Success: true})
 
 	default:
 		ns.reply(m, dto.RPCResponse{Success: false, Error: fmt.Sprintf("unknown rpc action: %s", req.Action)})

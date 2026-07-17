@@ -36,6 +36,11 @@ func NewChatController(hub *service.Hub, chatSvc *service.ChatService, natsSvc *
 	return &ChatController{hub: hub, chatSvc: chatSvc, natsSvc: natsSvc}
 }
 
+// ChatService returns the underlying chat service (history recall helpers).
+func (ctrl *ChatController) ChatService() *service.ChatService {
+	return ctrl.chatSvc
+}
+
 // SetCrypto attaches the message encryption helper (for client key distribution).
 func (ctrl *ChatController) SetCrypto(c *service.MsgCrypto) {
 	ctrl.crypto = c
@@ -122,16 +127,17 @@ func (ctrl *ChatController) JoinGroup(c *gin.Context) {
 		return
 	}
 
-	client, ok := ctrl.hub.GetClient(userID)
-	if !ok {
-		c.JSON(http.StatusNotFound, dto.APIResponseDTO{
-			Code:    404,
-			Message: "user is not online",
+	// rejoin=1 / silent=1: membership restore after reconnect — no "加入到群" notice.
+	announce := c.Query("rejoin") != "1" && c.Query("silent") != "1"
+	// Durable join + online hub join; first-time join may broadcast "加入到群".
+	if err := ctrl.chatSvc.JoinGroupForUser(userID, groupID, announce); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{
+			Code:    400,
+			Message: err.Error(),
 		})
 		return
 	}
 
-	ctrl.hub.JoinGroup(groupID, client)
 	c.JSON(http.StatusOK, dto.APIResponseDTO{
 		Code:    200,
 		Message: "joined group successfully",
@@ -153,16 +159,17 @@ func (ctrl *ChatController) LeaveGroup(c *gin.Context) {
 		return
 	}
 
-	client, ok := ctrl.hub.GetClient(userID)
-	if !ok {
-		c.JSON(http.StatusNotFound, dto.APIResponseDTO{
-			Code:    404,
-			Message: "user is not online",
+	// silent=1: membership cleanup without "退出群" notice.
+	announce := c.Query("silent") != "1"
+	// Durable leave + hub leave; full leave may broadcast "退出群".
+	if err := ctrl.chatSvc.LeaveGroupForUser(userID, groupID, announce); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{
+			Code:    400,
+			Message: err.Error(),
 		})
 		return
 	}
 
-	ctrl.hub.LeaveGroup(groupID, client)
 	c.JSON(http.StatusOK, dto.APIResponseDTO{
 		Code:    200,
 		Message: "left group successfully",
@@ -335,6 +342,8 @@ func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
 	if messages == nil {
 		messages = []dto.ChatMessageDTO{}
 	}
+	// Mask recalled messages for history viewers.
+	messages = ctrl.chatSvc.ApplyRecalls(messages)
 	c.JSON(http.StatusOK, dto.APIResponseDTO{
 		Code:    200,
 		Message: "success",

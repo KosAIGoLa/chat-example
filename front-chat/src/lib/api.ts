@@ -1,5 +1,8 @@
 import type {
 	CryptoKeyResponse,
+	FriendRequest,
+	FriendUser,
+	GroupInfo,
 	GroupMembersResponse,
 	HistoryResponse,
 	VoiceUploadResult
@@ -66,12 +69,71 @@ export const api = {
 		return request<OnlineUsersResponse>('/api/users/online');
 	},
 
-	joinGroup: async (groupId: string): Promise<unknown> => {
-		return request(`/api/groups/join?group_id=${encodeURIComponent(groupId)}`, { method: 'POST' });
+	/** Accepted friends (with online flag). */
+	listFriends: async (): Promise<{ friends: FriendUser[]; count: number }> => {
+		return request('/api/friends');
 	},
 
-	leaveGroup: async (groupId: string): Promise<unknown> => {
-		return request(`/api/groups/leave?group_id=${encodeURIComponent(groupId)}`, { method: 'POST' });
+	listIncomingFriendRequests: async (): Promise<{ requests: FriendRequest[]; count: number }> => {
+		return request('/api/friends/requests/incoming');
+	},
+
+	listOutgoingFriendRequests: async (): Promise<{ requests: FriendRequest[]; count: number }> => {
+		return request('/api/friends/requests/outgoing');
+	},
+
+	/** Invite by username (preferred) or user_id. Pending until the other accepts. */
+	inviteFriend: async (opts: { username?: string; user_id?: string }): Promise<FriendRequest> => {
+		return request('/api/friends/request', {
+			method: 'POST',
+			body: JSON.stringify(opts)
+		});
+	},
+
+	acceptFriendRequest: async (id: number): Promise<FriendRequest> => {
+		return request(`/api/friends/requests/${id}/accept`, { method: 'POST' });
+	},
+
+	rejectFriendRequest: async (id: number): Promise<FriendRequest> => {
+		return request(`/api/friends/requests/${id}/reject`, { method: 'POST' });
+	},
+
+	removeFriend: async (userId: string): Promise<void> => {
+		await request(`/api/friends/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+	},
+
+	/** Create a durable group (caller becomes owner). */
+	createGroup: async (opts?: { name?: string; group_id?: string }): Promise<GroupInfo> => {
+		return request<GroupInfo>('/api/groups', {
+			method: 'POST',
+			body: JSON.stringify(opts ?? {})
+		});
+	},
+
+	/** List groups I belong to. */
+	listMyGroups: async (): Promise<{ groups: GroupInfo[]; count: number }> => {
+		return request('/api/groups');
+	},
+
+	/** Owner-only: dissolve group and kick all members. */
+	dissolveGroup: async (groupId: string): Promise<{ group_id: string; name: string }> => {
+		return request(`/api/groups/${encodeURIComponent(groupId)}/dissolve`, { method: 'POST' });
+	},
+
+	/**
+	 * Join a group while online.
+	 * rejoin=true: restore membership after reconnect — no "加入到群" broadcast.
+	 */
+	joinGroup: async (groupId: string, opts?: { rejoin?: boolean }): Promise<unknown> => {
+		const q = new URLSearchParams({ group_id: groupId });
+		if (opts?.rejoin) q.set('rejoin', '1');
+		return request(`/api/groups/join?${q}`, { method: 'POST' });
+	},
+
+	leaveGroup: async (groupId: string, opts?: { silent?: boolean }): Promise<unknown> => {
+		const q = new URLSearchParams({ group_id: groupId });
+		if (opts?.silent) q.set('silent', '1');
+		return request(`/api/groups/leave?${q}`, { method: 'POST' });
 	},
 
 	getGroupMembers: async (groupId: string): Promise<GroupMembersResponse> => {

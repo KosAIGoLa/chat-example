@@ -125,14 +125,20 @@ func (c *Client) WritePump() {
 	}
 }
 
+// readWait is how long the server waits for any client activity (app data or
+// WebSocket pong). Client application heartbeats should be shorter than this.
+const readWait = 60 * time.Second
+
 // ReadPump reads messages from the websocket connection and forwards them
 // to the provided handler. Encrypted frames are opened before the handler runs.
+// Any successful read (including app-level {"type":"ping"}) extends the deadline.
 func (c *Client) ReadPump(handler func([]byte)) {
 	defer c.Close()
 
-	_ = c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	_ = c.Conn.SetReadDeadline(time.Now().Add(readWait))
+	// Protocol-level pong (reply to server Ping frames) also keeps the connection alive.
 	c.Conn.SetPongHandler(func(string) error {
-		_ = c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		_ = c.Conn.SetReadDeadline(time.Now().Add(readWait))
 		return nil
 	})
 
@@ -141,6 +147,9 @@ func (c *Client) ReadPump(handler func([]byte)) {
 		if err != nil {
 			return
 		}
+		// Client is alive — extend idle deadline on every frame.
+		_ = c.Conn.SetReadDeadline(time.Now().Add(readWait))
+
 		plain := message
 		if c.Crypto != nil {
 			opened, err := c.Crypto.OpenFrame(message)

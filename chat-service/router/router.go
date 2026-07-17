@@ -12,6 +12,8 @@ func SetupRouter(
 	chatCtrl *controller.ChatController,
 	authCtrl *controller.AuthController,
 	mediaCtrl *controller.MediaController,
+	friendCtrl *controller.FriendController,
+	groupCtrl *controller.GroupController,
 	authSvc *service.AuthService,
 ) *gin.Engine {
 	r := gin.Default()
@@ -30,6 +32,12 @@ func SetupRouter(
 		// Message body encryption key (AES-GCM) for WebSocket chat content.
 		api.GET("/crypto/key", chatCtrl.GetCryptoKey)
 
+		// Durable groups: create / list / dissolve
+		api.POST("/groups", groupCtrl.Create)
+		api.GET("/groups", groupCtrl.ListMine)
+		api.GET("/groups/:group_id", groupCtrl.Get)
+		api.POST("/groups/:group_id/dissolve", groupCtrl.Dissolve)
+
 		api.POST("/groups/join", chatCtrl.JoinGroup)
 		api.POST("/groups/leave", chatCtrl.LeaveGroup)
 		api.GET("/groups/:group_id/members", chatCtrl.GetGroupMembers)
@@ -37,6 +45,15 @@ func SetupRouter(
 		api.GET("/presence", chatCtrl.GetAllPresence)
 		api.GET("/presence/:user_id", chatCtrl.GetPresence)
 		api.GET("/history", chatCtrl.GetMessageHistory)
+
+		// Friends (invite → accept → list)
+		api.GET("/friends", friendCtrl.ListFriends)
+		api.GET("/friends/requests/incoming", friendCtrl.ListIncoming)
+		api.GET("/friends/requests/outgoing", friendCtrl.ListOutgoing)
+		api.POST("/friends/request", friendCtrl.SendRequest)
+		api.POST("/friends/requests/:id/accept", friendCtrl.AcceptRequest)
+		api.POST("/friends/requests/:id/reject", friendCtrl.RejectRequest)
+		api.DELETE("/friends/:user_id", friendCtrl.RemoveFriend)
 
 		// Voice messages
 		api.POST("/voice", mediaCtrl.UploadVoice)

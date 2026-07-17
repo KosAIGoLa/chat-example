@@ -52,8 +52,18 @@ func main() {
 	}
 
 	chatSvc := service.NewChatService(hub, natsSvc, msgCrypto)
+	msgStore := service.NewMessageStore(db)
+	chatSvc.SetMessageStore(msgStore)
+	friendSvc := service.NewFriendService(db, hub)
+	chatSvc.SetFriends(friendSvc)
+	groupSvc := service.NewGroupService(db, hub)
+	groupSvc.SetChatService(chatSvc)
+	chatSvc.SetGroups(groupSvc)
+
 	chatCtrl := controller.NewChatController(hub, chatSvc, natsSvc)
 	chatCtrl.SetCrypto(msgCrypto)
+	friendCtrl := controller.NewFriendController(friendSvc)
+	groupCtrl := controller.NewGroupController(groupSvc)
 
 	// Voice media storage
 	mediaDir := os.Getenv("MEDIA_DIR")
@@ -66,7 +76,7 @@ func main() {
 	}
 	mediaCtrl := controller.NewMediaController(mediaSvc)
 
-	r := router.SetupRouter(chatCtrl, authCtrl, mediaCtrl, authSvc)
+	r := router.SetupRouter(chatCtrl, authCtrl, mediaCtrl, friendCtrl, groupCtrl, authSvc)
 
 	log.Printf("Server starting on %s (NATS: %s, media: %s, msg-crypto: AES-GCM)", addr, natsURL, mediaDir)
 	if err := r.Run(addr); err != nil {

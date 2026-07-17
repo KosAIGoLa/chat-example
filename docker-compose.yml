@@ -54,8 +54,8 @@ services:
       - DB_USER=chat
       - DB_PASSWORD=chatpass
       - DB_NAME=chatdb
-      - JWT_SECRET="jwt_token"
-      - MSG_CRYPTO_KEY="msg_token"
+      - JWT_SECRET=4e2d5fb9300d10a7d21d2fdb1e4d813fb9d55dff75d7a2c9d8b13ec61a99f3e0f26cb6d92efc5e5b29c4f0fcd54cfe758d49893c5d97a5d1d87d88bb6d6b8d42
+      - MSG_CRYPTO_KEY=4YvS3j8M4wq2w2sQJv8S3JxQq7Q9iW4xQ6v9bW8H7nA
       - MEDIA_DIR=/app/data/voice
     volumes:
       - voice-data:/app/data/voice
