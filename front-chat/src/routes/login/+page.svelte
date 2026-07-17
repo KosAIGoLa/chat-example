@@ -10,6 +10,7 @@
 	import MessageCircle from '@lucide/svelte/icons/message-circle';
 	import CircleAlert from '@lucide/svelte/icons/circle-alert';
 	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
+	import CoffeeButton from '$lib/ui/CoffeeButton.svelte';
 
 	let mode = $state<'login' | 'register'>('login');
 	let username = $state('');
@@ -113,5 +114,11 @@
 				</Button>
 			</form>
 		</Card.Content>
+		<Card.Footer class="flex flex-col items-center gap-2 border-t pt-4">
+			<CoffeeButton variant="full" class="w-full" />
+			<p class="text-muted-foreground text-center text-[11px]">
+				Support development · TRON TRC-20
+			</p>
+		</Card.Footer>
 	</Card.Root>
 </div>

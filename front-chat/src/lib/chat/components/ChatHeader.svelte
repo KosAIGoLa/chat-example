@@ -17,6 +17,7 @@
 	import Coins from '@lucide/svelte/icons/coins';
 	import Camera from '@lucide/svelte/icons/camera';
 	import UserAvatar from './UserAvatar.svelte';
+	import CoffeeButton from '$lib/ui/CoffeeButton.svelte';
 
 	interface Props {
 		username: string;
@@ -191,6 +192,7 @@
 		</div>
 
 		<div class="flex items-center gap-2">
+			<CoffeeButton variant="icon" />
 			<Badge
 				variant="secondary"
 				class="gap-1 border border-amber-500/30 bg-amber-500/10 font-medium text-amber-700 dark:text-amber-300"
