@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import './layout.css';
-	import favicon from '$lib/assets/favicon.svg';
 	import NotifyHost from '$lib/ui/NotifyHost.svelte';
 
 	let { children } = $props();
@@ -16,7 +15,9 @@
 </script>
 
 <svelte:head>
-	<link rel="icon" href={favicon} />
+	<link rel="icon" href="/favicon.ico" sizes="any" />
+	<link rel="icon" type="image/png" href="/favicon-32x32.png" sizes="32x32" />
+	<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 	<title>WS Chat</title>
 </svelte:head>
 
