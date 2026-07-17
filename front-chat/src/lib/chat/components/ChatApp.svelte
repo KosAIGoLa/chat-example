@@ -28,6 +28,8 @@
 	import UserAvatar from './UserAvatar.svelte';
 	import { confirmDialog, toastError, toastInfo } from '$lib/ui/notify.svelte';
 	import { typingUI } from '../typing-ui.svelte';
+	import { replyPreviewOf } from '../utils';
+	import type { ChatMessage } from '../types';
 
 	const SIDEBAR_KEY = 'ws_chat_sidebar_open';
 
@@ -750,6 +752,7 @@
 				loading={chat.historyLoading}
 				loadingOlder={chat.historyLoadingOlder}
 				hasMore={chat.historyHasMore}
+				canReply={chat.chatMode === 'group' && !!groupId.trim()}
 				resolveName={(uid) =>
 					uid === chat.myUserId ? displayUsername || uid : chat.displayName(uid)
 				}
@@ -770,6 +773,26 @@
 				onBalanceChange={() => {
 					void chat.refreshBalance();
 				}}
+				onReply={(msg: ChatMessage) => {
+					if (chat.chatMode !== 'group' || !groupId.trim()) return;
+					if (!msg.from) return;
+					// Can reply to anyone's message (including own, for quote).
+					const name =
+						msg.from === userId
+							? displayUsername || msg.from
+							: chat.displayName(msg.from) || msg.from;
+					chat.setReplyTarget({
+						user_id: msg.from,
+						username: name || msg.from,
+						msg_id: msg.id,
+						preview: replyPreviewOf(msg)
+					});
+					toastInfo(`回复 @${name || msg.from}`, '回复');
+				}}
+				onEdit={async (msg, text) => {
+					await chat.editMessage(msg, text);
+					toastInfo('消息已编辑', '编辑');
+				}}
 				onLoadOlder={() => chat.loadOlderHistory()}
 			/>
 			<MessageInput
@@ -778,6 +801,8 @@
 				{groupId}
 				bind:value={inputText}
 				{typingHint}
+				replyTarget={chat.replyTarget}
+				onClearReply={() => chat.clearReplyTarget()}
 				onTyping={emitTyping}
 				onSend={send}
 				onSendVoice={sendVoice}
@@ -816,7 +841,9 @@
 				<div class="flex h-full flex-col">
 					<Sheet.Header class="border-b px-4 py-3">
 						<Sheet.Title>群成员</Sheet.Title>
-						<Sheet.Description>#{chat.groupDisplayName(groupId) || groupId}</Sheet.Description>
+						<Sheet.Description>
+							#{chat.groupDisplayName(groupId) || groupId} · 右键消息可回复
+						</Sheet.Description>
 					</Sheet.Header>
 					<div class="min-h-0 flex-1 overflow-hidden">
 						<GroupMembersPanel
@@ -824,10 +851,20 @@
 							members={chat.groupMembers}
 							myUserId={chat.myUserId}
 							unreadPeers={chat.unreadPeers}
+							replyUserId={chat.replyTarget?.user_id ?? ''}
 							onRefresh={() => chat.refreshGroupMembers()}
 							onSelectUser={(uid, name) => {
 								membersOpen = false;
 								void selectUser(uid, name);
+							}}
+							onReplyMember={(uid, name) => {
+								if (!uid || uid === userId) return;
+								chat.setReplyTarget({
+									user_id: uid,
+									username: name || chat.displayName(uid) || uid
+								});
+								membersOpen = false;
+								toastInfo(`回复 @${name || chat.displayName(uid) || uid}`, '群回复');
 							}}
 						/>
 					</div>

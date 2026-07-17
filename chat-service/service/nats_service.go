@@ -188,7 +188,7 @@ func (ns *NATSService) handleChatEvent(m *nats.Msg) {
 		return
 	}
 	switch peek.Type {
-	case "recall":
+	case "recall", "edit":
 		if peek.GroupID != "" {
 			for _, c := range ns.hub.GetGroupMembers(peek.GroupID) {
 				select {

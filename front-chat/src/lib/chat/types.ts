@@ -16,6 +16,16 @@ export interface PongMessage {
 	server_ts?: number;
 }
 
+/** Target when replying to a group member (optional quote of their message). */
+export interface ReplyTarget {
+	user_id: string;
+	username: string;
+	/** Quoted message id (optional). */
+	msg_id?: string;
+	/** Short preview of quoted text (optional). */
+	preview?: string;
+}
+
 export interface ChatMessage {
 	/** Stable id for recall (client-generated UUID hex / server-issued). */
 	id?: string;
@@ -31,6 +41,7 @@ export interface ChatMessage {
 		| 'ping'
 		| 'pong'
 		| 'recall'
+		| 'edit'
 		| 'error'
 		| 'friend_event';
 	from: string;
@@ -51,6 +62,16 @@ export interface ChatMessage {
 	encrypted?: boolean;
 	/** True after successful recall within the window. */
 	recalled?: boolean;
+	/** True after sender edited text within the window. */
+	edited?: boolean;
+	/** Group reply: target user id */
+	reply_to_user_id?: string;
+	/** Group reply: target display name */
+	reply_to_username?: string;
+	/** Group reply: quoted message id */
+	reply_to_id?: string;
+	/** Group reply: short quote preview */
+	reply_to_preview?: string;
 	/**
 	 * Client-only send pipeline status.
 	 * pending/sending: waiting for network / retrying
@@ -106,6 +127,18 @@ export interface RecallEvent {
 	from: string;
 	to?: string;
 	group_id?: string;
+	timestamp?: number;
+}
+
+/** Server push when a message is edited (content may be ciphertext). */
+export interface EditEvent {
+	type: 'edit';
+	id: string;
+	from: string;
+	to?: string;
+	group_id?: string;
+	content: string;
+	encrypted?: boolean;
 	timestamp?: number;
 }
 

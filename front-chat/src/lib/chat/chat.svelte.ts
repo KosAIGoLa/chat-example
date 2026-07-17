@@ -28,6 +28,7 @@ import type {
 	FriendRequest,
 	FriendUser,
 	GroupDissolvedEvent,
+	ReplyTarget,
 	GroupInfo,
 	GroupMember,
 	GroupMembersEvent,
@@ -37,6 +38,7 @@ import type {
 	PongMessage,
 	PresenceEvent,
 	RecallEvent,
+	EditEvent,
 	RedPacketClaimedEvent,
 	OfflineSyncEvent,
 	TypingEvent,
@@ -206,6 +208,8 @@ export function createChatController(opts: {
 	let typingUsers = $state<TypingUser[]>([]);
 	/** Preformatted hint for UI (kept in sync for reliable reactivity). */
 	let typingHint = $state('');
+	/** Group chat: reply-to member (optional quote). */
+	let replyTarget = $state<ReplyTarget | null>(null);
 	let connectionStatus = $state<ConnectionStatus>('disconnected');
 	let historyLoading = $state(false);
 	/** True while fetching an older page (scroll-up). */
@@ -1107,6 +1111,7 @@ export function createChatController(opts: {
 						| GroupMembersEvent
 						| PongMessage
 						| RecallEvent
+						| EditEvent
 						| FriendEvent
 						| { type: string; code?: string; message?: string };
 					// Application heartbeat reply.
@@ -1117,6 +1122,11 @@ export function createChatController(opts: {
 					// Message recall.
 					if ('type' in raw && raw.type === 'recall' && 'id' in raw) {
 						applyRecall((raw as RecallEvent).id);
+						return;
+					}
+					// Message edit.
+					if ('type' in raw && raw.type === 'edit' && 'id' in raw) {
+						void applyEditEvent(raw as EditEvent);
 						return;
 					}
 					// Private 1:1 call signaling (ring / accept).
@@ -1380,10 +1390,39 @@ export function createChatController(opts: {
 						recalled: true,
 						content: '',
 						media_url: undefined,
-						encrypted: false
+						encrypted: false,
+						edited: false
 					}
 				: m
 		);
+		persistActiveCache(messages);
+	}
+
+	async function applyEditEvent(ev: EditEvent) {
+		if (!ev?.id) return;
+		let plain = ev.content || '';
+		if (ev.encrypted || isEncryptedContent(plain)) {
+			try {
+				plain = await tryDecryptContent(plain);
+			} catch {
+				// keep ciphertext if decrypt fails
+			}
+		}
+		messages = messages.map((m) =>
+			m.id === ev.id
+				? {
+						...m,
+						content: plain,
+						encrypted: false,
+						edited: true,
+						_local_plain: plain
+					}
+				: m
+		);
+		persistActiveCache(messages);
+		// Refresh sidebar preview if this was the last message.
+		const hit = messages.find((m) => m.id === ev.id);
+		if (hit) updatePreview(hit);
 	}
 
 	async function refreshFriends() {
@@ -1725,6 +1764,24 @@ export function createChatController(opts: {
 		return { peer, g };
 	}
 
+	function setReplyTarget(target: ReplyTarget | null) {
+		if (!target?.user_id) {
+			replyTarget = null;
+			return;
+		}
+		// Only meaningful in group chats (and never reply to self as sole action).
+		replyTarget = {
+			user_id: String(target.user_id),
+			username: (target.username || target.user_id).trim() || target.user_id,
+			msg_id: target.msg_id?.trim() || undefined,
+			preview: target.preview?.trim() || undefined
+		};
+	}
+
+	function clearReplyTarget() {
+		replyTarget = null;
+	}
+
 	async function sendMessage() {
 		if (!inputText.trim()) return;
 
@@ -1737,6 +1794,15 @@ export function createChatController(opts: {
 		const plain = inputText.trim();
 		const id = newMsgId();
 		const ts = Math.floor(Date.now() / 1000);
+		const reply =
+			chatMode === 'group' && replyTarget?.user_id
+				? {
+						reply_to_user_id: replyTarget.user_id,
+						reply_to_username: replyTarget.username || replyTarget.user_id,
+						reply_to_id: replyTarget.msg_id,
+						reply_to_preview: replyTarget.preview
+					}
+				: {};
 
 		// Optimistic bubble immediately — shows "发送中…" while network recovers.
 		const local: ChatMessage = {
@@ -1750,10 +1816,12 @@ export function createChatController(opts: {
 			group_id: chatMode === 'group' ? dest.g : '',
 			timestamp: ts,
 			send_status: 'sending',
-			_local_plain: plain
+			_local_plain: plain,
+			...reply
 		};
 		appendMessage(local);
 		inputText = '';
+		replyTarget = null;
 		// Sending a message ends our typing state.
 		notifyTypingStop();
 
@@ -1804,7 +1872,11 @@ export function createChatController(opts: {
 			duration: local.duration,
 			group_id: local.group_id ?? '',
 			timestamp: local.timestamp ?? Math.floor(Date.now() / 1000),
-			red_packet_id: local.red_packet_id
+			red_packet_id: local.red_packet_id,
+			reply_to_user_id: local.reply_to_user_id,
+			reply_to_username: local.reply_to_username,
+			reply_to_id: local.reply_to_id,
+			reply_to_preview: local.reply_to_preview
 		};
 
 		try {
@@ -1881,6 +1953,63 @@ export function createChatController(opts: {
 		}
 	}
 
+	/** Edit own text message within 2 minutes. */
+	async function editMessage(msg: ChatMessage, newText: string) {
+		const id = msg.id;
+		const plain = newText.trim();
+		if (!id) return;
+		if (msg.from !== myUserId || msg.recalled) return;
+		if (!plain) {
+			toastError('消息内容不能为空');
+			return;
+		}
+		if (msg.content_type && msg.content_type !== 'text') {
+			toastError('仅文字消息可编辑');
+			return;
+		}
+		if (
+			msg.send_status === 'sending' ||
+			msg.send_status === 'failed' ||
+			msg.send_status === 'pending'
+		) {
+			toastInfo('消息尚未送达，无法编辑');
+			return;
+		}
+		try {
+			await ensureCryptoKey();
+			const cipher = await encryptContent(plain);
+			await wsSendReliable(
+				{
+					type: 'edit',
+					id,
+					from: myUserId,
+					to: msg.to,
+					content: cipher,
+					encrypted: true,
+					group_id: msg.group_id ?? ''
+				} satisfies ChatMessage,
+				{ attempts: 3, label: `edit:${id}` }
+			);
+			messages = messages.map((m) =>
+				m.id === id
+					? {
+							...m,
+							content: plain,
+							encrypted: false,
+							edited: true,
+							_local_plain: plain
+						}
+					: m
+			);
+			persistActiveCache(messages);
+			const hit = messages.find((m) => m.id === id);
+			if (hit) updatePreview(hit);
+		} catch (err) {
+			toastError((err as Error).message || '编辑失败');
+			throw err;
+		}
+	}
+
 	/** Upload recorded audio and send as a voice chat message. */
 	async function sendRedPacket(optsSend: {
 		total_amount: number;
@@ -1944,6 +2073,15 @@ export function createChatController(opts: {
 		const uploaded = await mediaService.uploadVoice(blob, durationSec);
 		const plainLabel = '🎤 语音消息';
 		const id = newMsgId();
+		const reply =
+			chatMode === 'group' && replyTarget?.user_id
+				? {
+						reply_to_user_id: replyTarget.user_id,
+						reply_to_username: replyTarget.username || replyTarget.user_id,
+						reply_to_id: replyTarget.msg_id,
+						reply_to_preview: replyTarget.preview
+					}
+				: {};
 		const local: ChatMessage = {
 			id,
 			type: chatMode,
@@ -1957,9 +2095,11 @@ export function createChatController(opts: {
 			group_id: chatMode === 'group' ? dest.g : '',
 			timestamp: Math.floor(Date.now() / 1000),
 			send_status: 'sending',
-			_local_plain: plainLabel
+			_local_plain: plainLabel,
+			...reply
 		};
 		appendMessage(local);
+		replyTarget = null;
 		await deliverChatMessage(local);
 		if (messages.find((m) => m.id === id)?.send_status === 'failed') {
 			throw new Error('语音已上传，但发送失败，可点击重试');
@@ -2164,6 +2304,7 @@ export function createChatController(opts: {
 
 		// Switch to private + clear blink first so UI goes normal immediately on click.
 		notifyTypingStop();
+		replyTarget = null;
 		chatMode = 'private';
 		targetUser = peer;
 		clearUnread(peer);
@@ -2263,6 +2404,8 @@ export function createChatController(opts: {
 
 	async function selectGroup(g: string) {
 		notifyTypingStop();
+		// Clear reply when switching groups.
+		if (groupId !== g) replyTarget = null;
 		chatMode = 'group';
 		groupId = g;
 		groupMembers = [];
@@ -2302,6 +2445,7 @@ export function createChatController(opts: {
 	}
 
 	function setChatMode(mode: ChatMode) {
+		if (mode !== chatMode) replyTarget = null;
 		if (chatMode === mode) return;
 		notifyTypingStop();
 		chatMode = mode;
@@ -2318,6 +2462,11 @@ export function createChatController(opts: {
 	}
 
 	return {
+		get replyTarget() {
+			return replyTarget;
+		},
+		setReplyTarget,
+		clearReplyTarget,
 		get messages() {
 			return messages;
 		},
@@ -2428,6 +2577,7 @@ export function createChatController(opts: {
 		notifyTyping,
 		notifyTypingStop,
 		recallMessage,
+		editMessage,
 		joinGroup,
 		leaveGroup,
 		createGroup,

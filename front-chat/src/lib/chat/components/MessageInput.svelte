@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
-	import type { ChatMode } from '../types';
+	import type { ChatMode, ReplyTarget } from '../types';
 	import { formatDuration } from '../utils';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -10,6 +10,7 @@
 	import X from '@lucide/svelte/icons/x';
 	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
 	import Info from '@lucide/svelte/icons/info';
+	import Reply from '@lucide/svelte/icons/reply';
 	const MAX_RECORD_SEC = 60;
 
 	interface Props {
@@ -19,6 +20,9 @@
 		value?: string;
 		/** Remote users typing label, e.g. "Alice 正在打字…" */
 		typingHint?: string;
+		/** Group: currently replying to a member */
+		replyTarget?: ReplyTarget | null;
+		onClearReply?: () => void;
 		onSend: () => void;
 		onSendVoice: (blob: Blob, durationSec: number) => Promise<void>;
 		onOpenRedPacket?: () => void;
@@ -32,6 +36,8 @@
 		groupId,
 		value = $bindable(''),
 		typingHint = '',
+		replyTarget = null,
+		onClearReply,
 		onSend,
 		onSendVoice,
 		onOpenRedPacket,
@@ -60,6 +66,10 @@
 
 	const peerLabel = $derived(
 		chatMode === 'private' ? `私聊 · ${targetUser}` : `群 · #${groupId}`
+	);
+
+	const replyName = $derived(
+		replyTarget ? replyTarget.username || replyTarget.user_id : ''
 	);
 
 	function handleSubmit(e: Event) {
@@ -249,6 +259,36 @@
 			<span class="truncate font-medium">{typingHint}</span>
 		</div>
 	{/if}
+	{#if chatMode === 'group' && replyTarget && replyName}
+		<div
+			class="border-primary/25 bg-primary/5 mb-2 flex items-start gap-2 rounded-xl border px-3 py-2"
+		>
+			<Reply class="text-primary mt-0.5 size-4 shrink-0" />
+			<div class="min-w-0 flex-1">
+				<p class="text-primary text-xs font-semibold">
+					回复 <span class="font-bold">@{replyName}</span>
+				</p>
+				{#if replyTarget.preview}
+					<p class="text-muted-foreground mt-0.5 line-clamp-2 text-[11px]">
+						{replyTarget.preview}
+					</p>
+				{:else}
+					<p class="text-muted-foreground mt-0.5 text-[11px]">对该成员发送群消息</p>
+				{/if}
+			</div>
+			<Button
+				type="button"
+				variant="ghost"
+				size="icon-xs"
+				class="shrink-0"
+				onclick={() => onClearReply?.()}
+				aria-label="取消回复"
+				title="取消回复"
+			>
+				<X class="size-3.5" />
+			</Button>
+		</div>
+	{/if}
 	{#if !canSend}
 		<div
 			class="text-muted-foreground bg-muted/40 flex items-center gap-2 rounded-lg border border-dashed px-4 py-3 text-sm"
@@ -306,7 +346,9 @@
 				{/if}
 				<Input
 					bind:value
-					placeholder="输入消息…"
+					placeholder={chatMode === 'group' && replyName
+						? `回复 @${replyName}…`
+						: '输入消息…'}
 					class="h-11"
 					autocomplete="off"
 					disabled={uploading}

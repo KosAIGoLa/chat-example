@@ -11,8 +11,11 @@ import (
 	"ws-ex/model"
 )
 
-// RecallWindow is how long a sender may recall a message after send.
+// RecallWindow is how long a sender may recall or edit a message after send.
 const RecallWindow = 2 * time.Minute
+
+// EditWindow matches recall window (edit own text within 2 minutes).
+const EditWindow = RecallWindow
 
 // MessageStore persists message metadata for recall authorization + seq allocation.
 type MessageStore struct {
@@ -109,6 +112,65 @@ func (s *MessageStore) RecalledIDs(ids []string) (map[string]bool, error) {
 	}
 	for _, r := range rows {
 		out[r.ID] = true
+	}
+	return out, nil
+}
+
+// Edit updates message body (ciphertext) if sender + within window + not recalled.
+func (s *MessageStore) Edit(msgID, fromUserID, content string) (*model.MessageRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("message store unavailable")
+	}
+	if content == "" {
+		return nil, errors.New("content is required")
+	}
+	var rec model.MessageRecord
+	if err := s.db.Where("id = ?", msgID).First(&rec).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("message not found")
+		}
+		return nil, err
+	}
+	if rec.FromUserID != fromUserID {
+		return nil, errors.New("only the sender can edit this message")
+	}
+	if rec.Recalled {
+		return nil, errors.New("cannot edit a recalled message")
+	}
+	sentAt := time.Unix(rec.Timestamp, 0)
+	if time.Since(sentAt) > EditWindow {
+		return nil, errors.New("edit window expired (2 minutes)")
+	}
+	now := time.Now()
+	if err := s.db.Model(&rec).Updates(map[string]interface{}{
+		"edited":         true,
+		"edited_at":      now,
+		"edited_content": content,
+	}).Error; err != nil {
+		return nil, err
+	}
+	rec.Edited = true
+	rec.EditedAt = &now
+	rec.EditedContent = content
+	return &rec, nil
+}
+
+// EditedBodies returns id → edited ciphertext for messages that were edited.
+func (s *MessageStore) EditedBodies(ids []string) (map[string]string, error) {
+	out := make(map[string]string)
+	if s == nil || s.db == nil || len(ids) == 0 {
+		return out, nil
+	}
+	var rows []model.MessageRecord
+	if err := s.db.Select("id", "edited_content").
+		Where("id IN ? AND edited = ? AND recalled = ?", ids, true, false).
+		Find(&rows).Error; err != nil {
+		return out, err
+	}
+	for _, r := range rows {
+		if r.EditedContent != "" {
+			out[r.ID] = r.EditedContent
+		}
 	}
 	return out, nil
 }

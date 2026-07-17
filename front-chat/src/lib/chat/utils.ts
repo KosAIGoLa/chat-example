@@ -39,9 +39,23 @@ export function messagePreview(msg: ChatMessage | undefined): string {
 	if (!msg) return '';
 	if (msg.recalled) return '撤回了一条消息';
 	if (isSystemMessage(msg)) return msg.content || '系统消息';
+	const replyPrefix = msg.reply_to_user_id
+		? `回复 @${msg.reply_to_username || msg.reply_to_user_id}：`
+		: '';
+	if (isRedPacketMessage(msg)) return `${replyPrefix}[红包]`;
+	if (isVoiceMessage(msg)) return `${replyPrefix}[语音]`;
+	const body = (msg.content || '').slice(0, 40);
+	return replyPrefix ? `${replyPrefix}${body}` : body;
+}
+
+/** Build a short quote snippet for reply_to_preview. */
+export function replyPreviewOf(msg: ChatMessage): string {
+	if (msg.recalled) return '已撤回的消息';
+	if (isSystemMessage(msg)) return (msg.content || '系统消息').slice(0, 80);
 	if (isRedPacketMessage(msg)) return '[红包]';
-	if (isVoiceMessage(msg)) return '[语音]';
-	return (msg.content || '').slice(0, 40);
+	if (isVoiceMessage(msg)) return `[语音 ${formatDuration(msg.duration)}]`;
+	const t = (msg.content || '').replace(/\s+/g, ' ').trim();
+	return t.length > 80 ? `${t.slice(0, 80)}…` : t;
 }
 
 /** Relative time for conversation list (unix seconds or ms). */
@@ -104,9 +118,20 @@ export function canRecallMessage(msg: ChatMessage, myUserId: string, now = Date.
 	if (msg.from !== myUserId) return false;
 	if (msg.content_type === 'system' || msg.content_type === 'red_packet') return false;
 	if (msg.type !== 'private' && msg.type !== 'group') return false;
+	if (msg.send_status === 'sending' || msg.send_status === 'failed' || msg.send_status === 'pending') {
+		return false;
+	}
 	const ts = (msg.timestamp ?? 0) * 1000;
 	if (!ts) return false;
 	return now - ts <= RECALL_WINDOW_MS;
+}
+
+/** Whether the sender may still edit this text message (same window as recall). */
+export function canEditMessage(msg: ChatMessage, myUserId: string, now = Date.now()): boolean {
+	if (!canRecallMessage(msg, myUserId, now)) return false;
+	// Text only — voice / red packet cannot be edited.
+	const ct = msg.content_type || 'text';
+	return ct === 'text';
 }
 
 /**

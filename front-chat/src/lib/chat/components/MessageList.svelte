@@ -15,6 +15,8 @@
 		loadingOlder?: boolean;
 		/** More older history available on server. */
 		hasMore?: boolean;
+		/** Enable reply action on group messages. */
+		canReply?: boolean;
 		/** Resolve user id → display name for avatars. */
 		resolveName?: (userId: string) => string;
 		/** Resolve user id → avatar image URL. */
@@ -22,6 +24,10 @@
 		onRecall?: (msg: ChatMessage) => void;
 		onResend?: (msg: ChatMessage) => void;
 		onBalanceChange?: (balance: number) => void;
+		/** Reply to message (group, via context menu). */
+		onReply?: (msg: ChatMessage) => void;
+		/** Edit own text message. */
+		onEdit?: (msg: ChatMessage, newText: string) => Promise<void> | void;
 		/** Scroll to top → load older history. Returns # of new messages. */
 		onLoadOlder?: () => Promise<number>;
 	}
@@ -32,11 +38,14 @@
 		loading = false,
 		loadingOlder = false,
 		hasMore = false,
+		canReply = false,
 		resolveName,
 		resolveAvatar,
 		onRecall,
 		onResend,
 		onBalanceChange,
+		onReply,
+		onEdit,
 		onLoadOlder
 	}: Props = $props();
 
@@ -162,9 +171,12 @@
 						{myUserId}
 						fromName={resolveName?.(msg.from) || msg.from}
 						avatarSrc={resolveAvatar?.(msg.from) || ''}
+						{canReply}
 						{onRecall}
 						{onResend}
 						{onBalanceChange}
+						{onReply}
+						{onEdit}
 					/>
 				{/each}
 			{/if}

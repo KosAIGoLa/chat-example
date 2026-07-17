@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"ws-ex/dto"
@@ -125,6 +126,8 @@ func (s *ChatService) HandleMessage(client *model.Client, raw []byte) {
 		s.sendGroup(&msg)
 	case "recall":
 		s.recallMessage(client, &msg)
+	case "edit":
+		s.editMessage(client, &msg)
 	case "join_group":
 		s.joinGroup(client, &msg)
 	case "leave_group":
@@ -360,6 +363,48 @@ func (s *ChatService) recallMessage(client *model.Client, msg *dto.ChatMessageDT
 	_ = s.nats.PublishEvent("chat.event.recall", data)
 }
 
+// editMessage handles type=edit — sender may change text body within EditWindow.
+// Client should send encrypted Content (same as normal messages).
+func (s *ChatService) editMessage(client *model.Client, msg *dto.ChatMessageDTO) {
+	if s.store == nil {
+		s.sendError(client, "edit_unavailable", "edit not available")
+		return
+	}
+	if msg.ID == "" {
+		s.sendError(client, "edit_bad_id", "message id is required")
+		return
+	}
+	if strings.TrimSpace(msg.Content) == "" {
+		s.sendError(client, "edit_empty", "content is required")
+		return
+	}
+	// Encrypt if client sent plaintext (EnsureEncrypted no-op on already ciphertext).
+	if err := s.encryptMessageContent(msg); err != nil {
+		s.sendError(client, "edit_encrypt_failed", "failed to encrypt edited content")
+		return
+	}
+	rec, err := s.store.Edit(msg.ID, client.UserID, msg.Content)
+	if err != nil {
+		s.sendError(client, "edit_denied", err.Error())
+		return
+	}
+	ev := dto.EditEvent{
+		Type:      "edit",
+		ID:        rec.ID,
+		From:      rec.FromUserID,
+		To:        rec.ToUserID,
+		GroupID:   rec.GroupID,
+		Content:   msg.Content,
+		Encrypted: true,
+		Timestamp: time.Now().Unix(),
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	_ = s.nats.PublishEvent("chat.event.edit", data)
+}
+
 // sendError pushes a small system error frame to the client.
 func (s *ChatService) sendError(client *model.Client, code, message string) {
 	payload := map[string]string{
@@ -418,14 +463,30 @@ func (s *ChatService) ApplyRecalls(messages []dto.ChatMessageDTO) []dto.ChatMess
 	}
 	recalled, err := s.store.RecalledIDs(ids)
 	if err != nil || len(recalled) == 0 {
+		// still try edits
+	} else {
+		for i := range messages {
+			if recalled[messages[i].ID] {
+				messages[i].Recalled = true
+				messages[i].Content = ""
+				messages[i].MediaURL = ""
+				messages[i].Encrypted = false
+			}
+		}
+	}
+	// Overlay latest edited ciphertext (not for recalled).
+	edited, err := s.store.EditedBodies(ids)
+	if err != nil || len(edited) == 0 {
 		return messages
 	}
 	for i := range messages {
-		if recalled[messages[i].ID] {
-			messages[i].Recalled = true
-			messages[i].Content = ""
-			messages[i].MediaURL = ""
-			messages[i].Encrypted = false
+		if messages[i].Recalled {
+			continue
+		}
+		if body, ok := edited[messages[i].ID]; ok && body != "" {
+			messages[i].Content = body
+			messages[i].Encrypted = true
+			messages[i].Edited = true
 		}
 	}
 	return messages

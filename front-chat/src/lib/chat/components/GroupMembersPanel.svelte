@@ -8,6 +8,7 @@
 	import Users from '@lucide/svelte/icons/users';
 	import Crown from '@lucide/svelte/icons/crown';
 	import Shield from '@lucide/svelte/icons/shield';
+	import Reply from '@lucide/svelte/icons/reply';
 	import UserAvatar from './UserAvatar.svelte';
 
 	interface Props {
@@ -16,8 +17,13 @@
 		myUserId: string;
 		/** user_id → unread private flag */
 		unreadPeers?: Record<string, boolean>;
+		/** Currently selected reply target user id (highlight). */
+		replyUserId?: string;
 		onRefresh: () => void;
+		/** Open private chat with member. */
 		onSelectUser: (userId: string, username?: string) => void;
+		/** Reply to member in this group chat. */
+		onReplyMember?: (userId: string, username?: string) => void;
 	}
 
 	let {
@@ -25,8 +31,10 @@
 		members,
 		myUserId,
 		unreadPeers = {},
+		replyUserId = '',
 		onRefresh,
-		onSelectUser
+		onSelectUser,
+		onReplyMember
 	}: Props = $props();
 
 	const onlineCount = $derived(members.filter((m) => m.online).length);
@@ -86,85 +94,120 @@
 			<ul class="space-y-0.5 px-1">
 				{#each members as u (u.user_id)}
 					{@const isMe = u.user_id === myUserId}
+					{@const isReplyTarget = !isMe && replyUserId === u.user_id}
 					<li>
-						<button
-							type="button"
-							class="hover:bg-sidebar-accent flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm transition-colors
-								{unreadPeers[u.user_id] && !isMe
-									? 'bg-amber-500/15 ring-1 ring-amber-400/50'
-									: ''}"
-							disabled={isMe}
-							onclick={() => {
-								if (!isMe) onSelectUser(u.user_id, u.username);
-							}}
-							title={isMe
-								? '我'
-								: unreadPeers[u.user_id]
-									? `未读 · 私聊 ${u.username || u.user_id}`
-									: `私聊 ${u.username || u.user_id}`}
+						<div
+							class="hover:bg-sidebar-accent flex w-full items-center gap-1 rounded-lg px-1.5 py-1.5 text-sm transition-colors
+								{isReplyTarget
+									? 'bg-primary/10 ring-1 ring-primary/40'
+									: unreadPeers[u.user_id] && !isMe
+										? 'bg-amber-500/15 ring-1 ring-amber-400/50'
+										: ''}"
 						>
-							<div class="relative shrink-0">
-								<UserAvatar
-									class="size-9"
-									name={u.username || u.user_id}
-									userId={u.user_id}
-									src={avatarSrc(u.user_id)}
-									alt={u.username}
-								/>
-								<span
-									class="border-background absolute right-0 bottom-0 size-2.5 rounded-full border-2
-										{u.online ? 'bg-emerald-500' : 'bg-muted-foreground/40'}"
-									title={u.online ? '在线' : '离线'}
-								></span>
-							</div>
-
-							<div class="min-w-0 flex-1">
-								<div class="flex min-w-0 items-center gap-1.5">
-									<span class="truncate font-medium" title="id: {u.user_id}">
-										{u.username || u.user_id}
-										{#if isMe}
-											<span class="text-muted-foreground font-normal">(我)</span>
-										{/if}
-									</span>
-									{#if u.role === 'owner'}
-										<Badge
-											variant="secondary"
-											class="h-5 shrink-0 gap-0.5 border border-amber-500/30 bg-amber-500/10 px-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
-										>
-											<Crown class="size-3" />
-											群主
-										</Badge>
-									{:else if u.role === 'admin'}
-										<Badge
-											variant="secondary"
-											class="h-5 shrink-0 gap-0.5 border border-sky-500/30 bg-sky-500/10 px-1.5 text-[10px] font-medium text-sky-700 dark:text-sky-300"
-										>
-											<Shield class="size-3" />
-											管理者
-										</Badge>
-									{:else}
-										<Badge variant="outline" class="text-muted-foreground h-5 shrink-0 px-1.5 text-[10px] font-normal">
-											一般成员
-										</Badge>
-									{/if}
+							<button
+								type="button"
+								class="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left disabled:opacity-70"
+								disabled={isMe}
+								onclick={() => {
+									if (isMe) return;
+									onSelectUser(u.user_id, u.username);
+								}}
+								title={isMe ? '我' : `私聊 ${u.username || u.user_id}`}
+							>
+								<div class="relative shrink-0">
+									<UserAvatar
+										class="size-9"
+										name={u.username || u.user_id}
+										userId={u.user_id}
+										src={avatarSrc(u.user_id)}
+										alt={u.username}
+									/>
+									<span
+										class="border-background absolute right-0 bottom-0 size-2.5 rounded-full border-2
+											{u.online ? 'bg-emerald-500' : 'bg-muted-foreground/40'}"
+										title={u.online ? '在线' : '离线'}
+									></span>
 								</div>
-								<p class="text-muted-foreground mt-0.5 text-[11px]">
-									{u.online ? '在线' : '离线'}
-									· {roleLabel(u.role)}
-								</p>
-							</div>
+
+								<div class="min-w-0 flex-1">
+									<div class="flex min-w-0 items-center gap-1.5">
+										<span class="truncate font-medium" title="id: {u.user_id}">
+											{u.username || u.user_id}
+											{#if isMe}
+												<span class="text-muted-foreground font-normal">(我)</span>
+											{/if}
+										</span>
+										{#if u.role === 'owner'}
+											<Badge
+												variant="secondary"
+												class="h-5 shrink-0 gap-0.5 border border-amber-500/30 bg-amber-500/10 px-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+											>
+												<Crown class="size-3" />
+												群主
+											</Badge>
+										{:else if u.role === 'admin'}
+											<Badge
+												variant="secondary"
+												class="h-5 shrink-0 gap-0.5 border border-sky-500/30 bg-sky-500/10 px-1.5 text-[10px] font-medium text-sky-700 dark:text-sky-300"
+											>
+												<Shield class="size-3" />
+												管理者
+											</Badge>
+										{:else}
+											<Badge
+												variant="outline"
+												class="text-muted-foreground h-5 shrink-0 px-1.5 text-[10px] font-normal"
+											>
+												一般成员
+											</Badge>
+										{/if}
+									</div>
+									<p class="text-muted-foreground mt-0.5 text-[11px]">
+										{u.online ? '在线' : '离线'}
+										· {roleLabel(u.role)}
+										{#if isReplyTarget}
+											· <span class="text-primary font-medium">回复中</span>
+										{/if}
+									</p>
+								</div>
+							</button>
 
 							{#if !isMe}
-								{#if unreadPeers[u.user_id]}
-									<span
-										class="bg-amber-500 size-2 shrink-0 animate-pulse rounded-full"
-										aria-label="未读"
-									></span>
-								{:else}
-									<MessageCircle class="text-muted-foreground size-3.5 shrink-0 opacity-50" />
-								{/if}
+								<div class="flex shrink-0 items-center gap-0.5 pr-0.5">
+									{#if onReplyMember}
+										<Button
+											variant={isReplyTarget ? 'default' : 'ghost'}
+											size="icon-xs"
+											title={`回复 @${u.username || u.user_id}`}
+											aria-label="回复该成员"
+											onclick={() => onReplyMember(u.user_id, u.username)}
+										>
+											<Reply class="size-3.5" />
+										</Button>
+									{/if}
+									<Button
+										variant="ghost"
+										size="icon-xs"
+										title={unreadPeers[u.user_id]
+											? `未读 · 私聊 ${u.username || u.user_id}`
+											: `私聊 ${u.username || u.user_id}`}
+										aria-label="私聊"
+										onclick={() => onSelectUser(u.user_id, u.username)}
+									>
+										{#if unreadPeers[u.user_id]}
+											<span class="relative">
+												<MessageCircle class="size-3.5" />
+												<span
+													class="bg-amber-500 absolute -top-0.5 -right-0.5 size-1.5 animate-pulse rounded-full"
+												></span>
+											</span>
+										{:else}
+											<MessageCircle class="text-muted-foreground size-3.5 opacity-70" />
+										{/if}
+									</Button>
+								</div>
 							{/if}
-						</button>
+						</div>
 					</li>
 				{:else}
 					<li class="text-muted-foreground px-2 py-8 text-center text-sm">暂无成员</li>

@@ -21,6 +21,15 @@ type ChatMessageDTO struct {
 	Encrypted bool `json:"encrypted,omitempty"`
 	// Recalled is true after a successful recall (history + live updates).
 	Recalled bool `json:"recalled,omitempty"`
+	// Edited is true after the sender edited the text body within the window.
+	Edited bool `json:"edited,omitempty"`
+
+	// Reply-to (group): address another member; optional quote of a message.
+	// Metadata is not encrypted (only Content is); safe for display before decrypt.
+	ReplyToUserID   string `json:"reply_to_user_id,omitempty"`
+	ReplyToUsername string `json:"reply_to_username,omitempty"`
+	ReplyToID       string `json:"reply_to_id,omitempty"`      // quoted message id
+	ReplyToPreview  string `json:"reply_to_preview,omitempty"` // short plaintext quote
 }
 
 // RecallEvent is pushed over WebSocket when a message is recalled.
@@ -31,6 +40,19 @@ type RecallEvent struct {
 	From      string `json:"from"`
 	To        string `json:"to,omitempty"`
 	GroupID   string `json:"group_id,omitempty"`
+	Timestamp int64  `json:"timestamp,omitempty"`
+}
+
+// EditEvent is pushed when the sender edits a text message within the window.
+// type: "edit" — Content is ciphertext (same as normal chat body).
+type EditEvent struct {
+	Type      string `json:"type"` // "edit"
+	ID        string `json:"id"`
+	From      string `json:"from"`
+	To        string `json:"to,omitempty"`
+	GroupID   string `json:"group_id,omitempty"`
+	Content   string `json:"content"`
+	Encrypted bool   `json:"encrypted,omitempty"`
 	Timestamp int64  `json:"timestamp,omitempty"`
 }
 
