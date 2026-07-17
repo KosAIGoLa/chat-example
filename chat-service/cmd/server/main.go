@@ -82,6 +82,7 @@ func main() {
 	lkSvc := service.NewLiveKitService()
 	meetingSvc := service.NewMeetingService()
 	livekitCtrl := controller.NewLiveKitController(lkSvc, hub, friendSvc, groupSvc, meetingSvc)
+	livekitCtrl.SetChat(chatSvc)
 
 	// Voice media storage
 	mediaDir := os.Getenv("MEDIA_DIR")

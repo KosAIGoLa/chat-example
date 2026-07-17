@@ -666,6 +666,34 @@ func (s *ChatService) BroadcastPlainGroupNotice(groupID, content string) {
 	}
 }
 
+// BroadcastPlainPrivateNotice posts a system line into the private chat stream
+// (e.g. "结束语音通话"). From/To must be the two user ids so history filters match.
+// Content is plaintext system; not encrypted. Live-delivered to both sides.
+func (s *ChatService) BroadcastPlainPrivateNotice(fromUID, toUID, content string) {
+	if s == nil || s.nats == nil || fromUID == "" || toUID == "" || content == "" {
+		return
+	}
+	msg := &dto.ChatMessageDTO{
+		Type:        "private",
+		From:        fromUID,
+		To:          toUID,
+		Content:     content,
+		ContentType: "system",
+		Timestamp:   time.Now().Unix(),
+	}
+	s.ensureMessageID(msg)
+	if err := s.nats.PublishPrivate(msg); err != nil {
+		log.Printf("[Chat] failed to publish private notice %s→%s: %v", fromUID, toUID, err)
+		return
+	}
+	// Echo to sender (PublishPrivate targets recipient subject only).
+	if s.hub != nil {
+		if data, err := json.Marshal(msg); err == nil {
+			s.hub.DeliverToUser(fromUID, data)
+		}
+	}
+}
+
 // sendHistory retrieves message history from JetStream and sends it to the client.
 // Private: {"type":"history","to":"<peerUserID>"}
 // Group:   {"type":"history","group_id":"<groupID>"}

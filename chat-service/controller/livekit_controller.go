@@ -22,6 +22,7 @@ type LiveKitController struct {
 	hub      *service.Hub
 	friends  *service.FriendService
 	groups   *service.GroupService
+	chat     *service.ChatService
 }
 
 func NewLiveKitController(
@@ -38,6 +39,11 @@ func NewLiveKitController(
 		groups:   groups,
 		meetings: meetings,
 	}
+}
+
+// SetChat wires chat notices (private call end system lines).
+func (ctrl *LiveKitController) SetChat(chat *service.ChatService) {
+	ctrl.chat = chat
 }
 
 func (ctrl *LiveKitController) me(c *gin.Context) (uint, string, string) {
@@ -246,9 +252,49 @@ func (ctrl *LiveKitController) SignalCall(c *gin.Context) {
 			}
 		}
 		ctrl.hub.DeliverToUser(to, data)
+		// Chat bubble: 结束语音 / 结束视讯 (and cancel/reject variants).
+		ctrl.postPrivateCallNotice(uidStr, username, to, body.Action, body.Media)
 	}
 
 	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "signaled", Data: body})
+}
+
+// postPrivateCallNotice writes a system line into the private conversation.
+// end → 结束语音通话 / 结束视讯通话
+// cancel → 取消语音通话 / 取消视讯通话
+// reject → 拒绝语音通话 / 拒绝视讯通话
+func (ctrl *LiveKitController) postPrivateCallNotice(fromUID, fromName, toUID, action, media string) {
+	if ctrl.chat == nil || fromUID == "" || toUID == "" {
+		return
+	}
+	action = strings.ToLower(strings.TrimSpace(action))
+	switch action {
+	case "end", "cancel", "reject":
+		// ok
+	default:
+		return
+	}
+	kind := "语音"
+	if strings.ToLower(strings.TrimSpace(media)) == "video" {
+		kind = "视讯"
+	}
+	name := strings.TrimSpace(fromName)
+	if name == "" {
+		name = fromUID
+	}
+	var text string
+	switch action {
+	case "end":
+		// e.g. 结束语音通话 / 结束视讯通话
+		text = fmt.Sprintf("%s 结束了%s通话", name, kind)
+	case "cancel":
+		text = fmt.Sprintf("%s 取消了%s通话", name, kind)
+	case "reject":
+		text = fmt.Sprintf("%s 拒绝了%s通话", name, kind)
+	default:
+		return
+	}
+	ctrl.chat.BroadcastPlainPrivateNotice(fromUID, toUID, text)
 }
 
 // MeetingAction POST /api/livekit/meeting

@@ -620,6 +620,7 @@ export function createCallController(opts: {
 					action: 'reject',
 					room: r,
 					call_type: 'private',
+					media: mediaMode,
 					to: p
 				});
 			}
@@ -680,6 +681,7 @@ export function createCallController(opts: {
 						action: 'reject',
 						room: prevRoom,
 						call_type: 'private',
+						media: mediaMode,
 						to: prevPeer
 					});
 				}
@@ -694,6 +696,7 @@ export function createCallController(opts: {
 							prevPhase === 'outgoing' || prevPhase === 'connecting' ? 'cancel' : 'end',
 						room: prevRoom,
 						call_type: 'private',
+						media: mediaMode,
 						to: prevPeer
 					});
 				}
