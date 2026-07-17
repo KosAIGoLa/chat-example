@@ -1,0 +1,55 @@
+---
+description: ws-ex monorepo engineering conventions (Go chat-service + SvelteKit front-chat)
+alwaysApply: true
+---
+
+# ws-ex Engineering (Cursor)
+
+## Stack
+
+- `chat-service/`: Go · Gin · NATS JetStream · Postgres · LiveKit tokens · JWT
+- `front-chat/`: SvelteKit 5 · Svelte 5 runes · Tailwind 4 · shadcn-svelte · pnpm
+- Compose: nats · postgres · livekit · ws-server · frontend (nginx)
+
+## Architecture
+
+- Backend layers: `controller` → `service` → `model`/`dto`; routes in `router/`; validation in `validate/`
+- Frontend: `$lib/api/*` (HTTP/WS) → `$lib/chat/controller/*` → `$lib/chat/components/*`
+- Messages: WS frames, `id`+`seq`, private direct / group NATS fan-out, JetStream history (~180d)
+- Pagination: `before_seq`/`before_ts` older; `since_seq` newer; client `has_more`
+- Group roles: owner > admin > member
+
+## Commands
+
+```bash
+docker compose up -d --build
+cd chat-service && go run ./cmd/server && go test ./...
+cd front-chat && pnpm install && pnpm dev
+cd front-chat && pnpm check && pnpm lint && pnpm test
+```
+
+Use **pnpm** only in `front-chat`.
+
+## Rules of change
+
+1. Minimal diffs; no drive-by refactors
+2. Keep DTO ↔ `types.ts` ↔ API client in sync
+3. Svelte 5: `$state` / `$derived` / `$props` / `$effect` only
+4. UI Chinese; toasts via `$lib/ui/notify.svelte.ts` (no `window.alert`)
+5. Do not commit secrets; do not force-push unless asked
+6. After UI/TS changes run `pnpm check`; after Go logic run tests/build
+
+## Feature map (where to edit)
+
+| Feature | Backend | Frontend |
+|---------|---------|----------|
+| Chat/history | chat controller/service, NATS | history.ts, MessageList.svelte |
+| Pins | group announcements, private pins | GroupAnnouncementsBar.svelte |
+| Friends | friend_service | friends.ts, ChatSidebar |
+| Groups | group_service | groups.ts, GroupSettings |
+| Red packet | red_packet_service | RedPacketCard, SendRedPacketDialog |
+| Call/meeting | livekit_* | call.svelte.ts, CallPanel |
+
+## Skills
+
+See `.cursor/skills.md` and `.cursor/skills/ws-ex-dev/SKILL.md`. Full narrative: root `AGENTS.md`.
