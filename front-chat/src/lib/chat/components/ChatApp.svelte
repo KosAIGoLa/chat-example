@@ -26,7 +26,7 @@
 	import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
 	import * as Sheet from '$lib/components/ui/sheet';
 	import UserAvatar from './UserAvatar.svelte';
-	import { toastError, toastInfo } from '$lib/ui/notify.svelte';
+	import { confirmDialog, toastError, toastInfo } from '$lib/ui/notify.svelte';
 	import { typingUI } from '../typing-ui.svelte';
 
 	const SIDEBAR_KEY = 'ws_chat_sidebar_open';
@@ -112,8 +112,9 @@
 		const meta = chat.groupMeta[id];
 		const meeting = chat.activeMeetings[id];
 		const role = meta?.role;
-		const isOwner = role === 'owner' || meta?.owner_user_id === userId;
-		const isAdmin = role === 'admin';
+		// Dissolve / role changes: owner only (never treat admin as owner).
+		const isOwner = chat.isGroupOwner(id);
+		const isAdmin = role === 'admin' && !isOwner;
 		const canManage = isOwner || isAdmin || chat.isGroupManager(id);
 		return {
 			id,
@@ -660,24 +661,26 @@
 							class="text-muted-foreground h-8 gap-1 px-2"
 							title="清除本机缓存的聊天记录（不影响服务器）"
 							onclick={() => {
-								const hasMsgs = chat.messages.length > 0;
-								if (!hasMsgs && !targetUser && !groupId) {
-									toastInfo('当前没有可清除的本地记录');
-									return;
-								}
-								if (
-									typeof window !== 'undefined' &&
-									!window.confirm(
-										'清除当前会话在本机缓存的历史消息？\n（服务器记录不受影响，重新打开会话可再同步）'
-									)
-								) {
-									return;
-								}
-								const n = chat.clearLocalHistory();
-								toastInfo(
-									n > 0 ? '已清除本机会话历史' : '当前会话本地记录已清空',
-									'本地历史'
-								);
+								void (async () => {
+									const hasMsgs = chat.messages.length > 0;
+									if (!hasMsgs && !targetUser && !groupId) {
+										toastInfo('当前没有可清除的本地记录');
+										return;
+									}
+									const ok = await confirmDialog({
+										title: '清除本地历史',
+										message:
+											'清除当前会话在本机缓存的历史消息？\n（服务器记录不受影响，重新打开会话可再同步）',
+										confirmText: '清除',
+										danger: true
+									});
+									if (!ok) return;
+									const n = chat.clearLocalHistory();
+									toastInfo(
+										n > 0 ? '已清除本机会话历史' : '当前会话本地记录已清空',
+										'本地历史'
+									);
+								})();
 							}}
 						>
 							<Trash2 class="size-4" />
@@ -838,7 +841,13 @@
 					<Sheet.Header class="border-b px-4 py-3">
 						<Sheet.Title>群配置</Sheet.Title>
 						<Sheet.Description>
-							编辑群名与群图片、管理角色、解散群
+							{#if activeGroup?.isOwner}
+								编辑群名与群图片、管理角色、解散群（仅群主）
+							{:else if activeGroup?.canManage}
+								编辑群名与群图片（管理者无权解散群）
+							{:else}
+								查看群资料；可退出本群
+							{/if}
 						</Sheet.Description>
 					</Sheet.Header>
 					<div class="min-h-0 flex-1 overflow-hidden">
@@ -868,6 +877,10 @@
 								}}
 								onDissolve={async () => {
 									const gid = groupId.trim();
+									if (!chat.isGroupOwner(gid)) {
+										toastError('仅群主可以解散群');
+										return;
+									}
 									await chat.dissolveGroup(gid);
 									settingsOpen = false;
 									groupId = chat.groupId;

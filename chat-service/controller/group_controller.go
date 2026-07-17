@@ -114,7 +114,7 @@ func (ctrl *GroupController) Get(c *gin.Context) {
 	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "success", Data: g})
 }
 
-// Dissolve POST /api/groups/:group_id/dissolve
+// Dissolve POST /api/groups/:group_id/dissolve — owner only (admins cannot dissolve).
 func (ctrl *GroupController) Dissolve(c *gin.Context) {
 	groupID, err := validate.GroupID(c.Param("group_id"), true)
 	if err != nil {
@@ -128,7 +128,11 @@ func (ctrl *GroupController) Dissolve(c *gin.Context) {
 			writeValidateErr(c, err)
 			return
 		}
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "only the owner") {
+			code = http.StatusForbidden
+		}
+		c.JSON(code, dto.APIResponseDTO{Code: code, Message: err.Error()})
 		return
 	}
 	by := strconv.FormatUint(uint64(me), 10)

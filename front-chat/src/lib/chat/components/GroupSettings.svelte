@@ -7,6 +7,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import * as ScrollArea from '$lib/components/ui/scroll-area';
 	import UserAvatar from './UserAvatar.svelte';
+	import { alertDialog, alertError, confirmDialog } from '$lib/ui/notify.svelte';
 	import Camera from '@lucide/svelte/icons/camera';
 	import Crown from '@lucide/svelte/icons/crown';
 	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
@@ -137,50 +138,65 @@
 	async function toggleRole(m: GroupMember) {
 		if (!isOwner || m.user_id === myUserId || m.role === 'owner') return;
 		const next: 'admin' | 'member' = m.role === 'admin' ? 'member' : 'admin';
-		const tip =
-			next === 'admin'
-				? `将「${m.username || m.user_id}」升级为管理者？`
-				: `将「${m.username || m.user_id}」降为一般成员？`;
-		if (typeof window !== 'undefined' && !window.confirm(tip)) return;
+		const ok = await confirmDialog({
+			title: next === 'admin' ? '升级为管理者' : '降为一般成员',
+			message:
+				next === 'admin'
+					? `将「${m.username || m.user_id}」升级为管理者？`
+					: `将「${m.username || m.user_id}」降为一般成员？`,
+			confirmText: next === 'admin' ? '升级' : '降级'
+		});
+		if (!ok) return;
 		roleBusyId = m.user_id;
 		try {
 			await onSetRole(m.user_id, next);
 		} catch (err) {
-			alert((err as Error).message || '修改角色失败');
+			await alertError((err as Error).message || '修改角色失败');
 		} finally {
 			roleBusyId = '';
 		}
 	}
 
 	async function handleDissolve() {
-		if (
-			typeof window !== 'undefined' &&
-			!window.confirm(`解散群「${displayName}」？所有成员将被移除，此操作不可恢复。`)
-		) {
+		// Extra guard: only owner UI should call this.
+		if (!isOwner) {
+			await alertDialog({
+				title: '无权操作',
+				message: '仅群主可以解散群',
+				kind: 'warning'
+			});
 			return;
 		}
+		const ok = await confirmDialog({
+			title: '解散群聊',
+			message: `解散群「${displayName}」？所有成员将被移除，此操作不可恢复。`,
+			confirmText: '解散',
+			danger: true
+		});
+		if (!ok) return;
 		dangerBusy = true;
 		try {
 			await onDissolve();
 		} catch (err) {
-			alert((err as Error).message || '解散失败');
+			await alertError((err as Error).message || '解散失败');
 		} finally {
 			dangerBusy = false;
 		}
 	}
 
 	async function handleLeave() {
-		if (
-			typeof window !== 'undefined' &&
-			!window.confirm(`退出群「${displayName}」？`)
-		) {
-			return;
-		}
+		const ok = await confirmDialog({
+			title: '退出群聊',
+			message: `退出群「${displayName}」？退出后将不再接收该群消息。`,
+			confirmText: '退出',
+			danger: true
+		});
+		if (!ok) return;
 		dangerBusy = true;
 		try {
 			await onLeave();
 		} catch (err) {
-			alert((err as Error).message || '退出失败');
+			await alertError((err as Error).message || '退出失败');
 		} finally {
 			dangerBusy = false;
 		}
@@ -415,12 +431,12 @@
 				</ul>
 			</section>
 
-			<!-- 危险操作 -->
+			<!-- 危险操作：解散仅群主；管理者/成员只能退出 -->
 			<section class="space-y-2 border-t pt-4 pb-6">
 				<p class="text-destructive text-sm font-medium">危险操作</p>
 				{#if isOwner}
 					<p class="text-muted-foreground text-[11px]">
-						解散后群将被删除，所有成员失去访问权。此操作不可恢复。
+						仅群主可解散。解散后群将被删除，所有成员失去访问权，不可恢复。
 					</p>
 					<Button
 						variant="destructive"
@@ -436,7 +452,13 @@
 						解散群
 					</Button>
 				{:else}
-					<p class="text-muted-foreground text-[11px]">退出后将不再接收该群消息，可再次搜索加入。</p>
+					<p class="text-muted-foreground text-[11px]">
+						{#if canManage}
+							管理者可改群名/群图，但无权解散群。退出后将不再接收该群消息。
+						{:else}
+							退出后将不再接收该群消息，可再次搜索加入。
+						{/if}
+					</p>
 					<Button
 						variant="outline"
 						class="text-destructive border-destructive/40 hover:bg-destructive/10 w-full gap-2"

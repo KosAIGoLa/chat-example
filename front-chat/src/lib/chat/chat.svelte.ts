@@ -2060,9 +2060,13 @@ export function createChatController(opts: {
 		return m;
 	}
 
+	/** Owner-only: dissolve group. Admins / members cannot. */
 	async function dissolveGroup(g: string) {
 		const id = g.trim();
 		if (!id) return;
+		if (!isGroupOwner(id)) {
+			throw new Error('仅群主可以解散群');
+		}
 		await groupService.dissolve(id);
 		joinedGroups = joinedGroups.filter((g2) => g2 !== id);
 		saveJoinedGroups(joinedGroups);
@@ -2131,16 +2135,26 @@ export function createChatController(opts: {
 		return groupMeta[id]?.name || id;
 	}
 
+	/**
+	 * True only for the group owner (not admin / member).
+	 * Prefer role; fall back to owner_user_id only when role is unknown.
+	 */
 	function isGroupOwner(id: string): boolean {
-		return groupMeta[id]?.role === 'owner' || groupMeta[id]?.owner_user_id === myUserId;
+		const meta = groupMeta[id.trim()];
+		if (!meta) return false;
+		const r = String(meta.role ?? '').toLowerCase();
+		if (r === 'owner') return true;
+		// Explicit non-owner roles must never count as owner (incl. admin).
+		if (r === 'admin' || r === 'member') return false;
+		return String(meta.owner_user_id ?? '') === String(myUserId);
 	}
 
-	/** Owner or admin may edit name / avatar. */
+	/** Owner or admin may edit name / avatar. Dissolve is owner-only. */
 	function isGroupManager(gid: string): boolean {
 		const id = gid.trim();
 		if (!id) return false;
-		const r = groupMeta[id]?.role;
-		return r === 'owner' || r === 'admin' || groupMeta[id]?.owner_user_id === myUserId;
+		if (isGroupOwner(id)) return true;
+		return groupMeta[id]?.role === 'admin';
 	}
 
 	async function selectPrivateUser(userId: string, username?: string) {
@@ -2392,7 +2406,6 @@ export function createChatController(opts: {
 		hasUnread,
 		hasGroupUnread,
 		typingLabel,
-		isGroupOwner,
 		connect,
 		disconnect,
 		reconnectNow,
@@ -2423,6 +2436,7 @@ export function createChatController(opts: {
 		uploadGroupAvatar,
 		renameGroup,
 		setMemberRole,
+		isGroupOwner,
 		isGroupManager,
 		groupDisplayName,
 		selectPrivateUser,

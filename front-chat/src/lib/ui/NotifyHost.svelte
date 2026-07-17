@@ -2,9 +2,12 @@
 	import { Button } from '$lib/components/ui/button';
 	import {
 		dismissToast,
+		getAlertOptions,
 		getConfirmOptions,
 		getToasts,
+		isAlertOpen,
 		isConfirmOpen,
+		resolveAlert,
 		resolveConfirm,
 		type ToastKind
 	} from './notify.svelte';
@@ -18,6 +21,8 @@
 	const toasts = $derived(getToasts());
 	const confirmOpen = $derived(isConfirmOpen());
 	const confirmOpts = $derived(getConfirmOptions());
+	const alertOpen = $derived(isAlertOpen());
+	const alertOpts = $derived(getAlertOptions());
 
 	function kindClass(kind: ToastKind): string {
 		switch (kind) {
@@ -30,6 +35,10 @@
 			default:
 				return 'border-border bg-card text-card-foreground';
 		}
+	}
+
+	function alertIconKind(kind?: ToastKind): ToastKind {
+		return kind ?? 'info';
 	}
 </script>
 
@@ -76,6 +85,74 @@
 	{/each}
 </div>
 
+<!-- Alert modal (replaces window.alert) -->
+{#if alertOpen}
+	{@const ak = alertIconKind(alertOpts.kind)}
+	<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+	<div
+		class="bg-background/70 fixed inset-0 z-[120] flex items-center justify-center p-4 backdrop-blur-sm"
+		role="presentation"
+		onclick={(e) => {
+			if (e.target === e.currentTarget) resolveAlert();
+		}}
+		onkeydown={(e) => {
+			if (e.key === 'Escape' || e.key === 'Enter') {
+				e.preventDefault();
+				resolveAlert();
+			}
+		}}
+	>
+		<div
+			class="bg-card w-full max-w-sm rounded-2xl border p-5 shadow-2xl"
+			role="alertdialog"
+			aria-modal="true"
+			aria-labelledby="alert-title"
+			tabindex="-1"
+		>
+			<div class="flex items-start gap-3">
+				<div
+					class={cn(
+						'mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-full',
+						ak === 'error'
+							? 'bg-red-500/15 text-red-600 dark:text-red-400'
+							: ak === 'warning'
+								? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+								: ak === 'success'
+									? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+									: 'bg-primary/10 text-primary'
+					)}
+				>
+					{#if ak === 'success'}
+						<CircleCheck class="size-5" />
+					{:else if ak === 'error'}
+						<CircleAlert class="size-5" />
+					{:else if ak === 'warning'}
+						<TriangleAlert class="size-5" />
+					{:else}
+						<Info class="size-5" />
+					{/if}
+				</div>
+				<div class="min-w-0 flex-1">
+					<h2 id="alert-title" class="text-base font-semibold">
+						{alertOpts.title ?? '提示'}
+					</h2>
+					<p class="text-muted-foreground mt-2 text-sm leading-relaxed whitespace-pre-wrap">
+						{alertOpts.message}
+					</p>
+				</div>
+			</div>
+			<div class="mt-5 flex justify-end">
+				<Button
+					variant={ak === 'error' ? 'destructive' : 'default'}
+					onclick={() => resolveAlert()}
+				>
+					{alertOpts.okText ?? '知道了'}
+				</Button>
+			</div>
+		</div>
+	</div>
+{/if}
+
 <!-- Confirm modal -->
 {#if confirmOpen}
 	<div
@@ -88,7 +165,7 @@
 			<h2 id="confirm-title" class="text-base font-semibold">
 				{confirmOpts.title ?? '请确认'}
 			</h2>
-			<p class="text-muted-foreground mt-2 text-sm leading-relaxed">
+			<p class="text-muted-foreground mt-2 text-sm leading-relaxed whitespace-pre-wrap">
 				{confirmOpts.message}
 			</p>
 			<div class="mt-5 flex justify-end gap-2">

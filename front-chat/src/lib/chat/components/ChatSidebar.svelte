@@ -365,9 +365,14 @@
 		return groupMeta[id]?.name || id;
 	}
 
+	/** Owner only — admin/member must not see dissolve. */
 	function isOwner(id: string): boolean {
 		const m = groupMeta[id];
-		return m?.role === 'owner' || m?.owner_user_id === myUserId;
+		if (!m) return false;
+		const r = String(m.role ?? '').toLowerCase();
+		if (r === 'owner') return true;
+		if (r === 'admin' || r === 'member') return false;
+		return String(m.owner_user_id ?? '') === String(myUserId);
 	}
 
 	async function handleInvite() {
