@@ -46,6 +46,17 @@ func (s *OfflineService) Delete(id string) error {
 	return s.db.Where("id = ?", id).Delete(&model.OfflineMessage{}).Error
 }
 
+// ClearBetween deletes offline private messages between two users (either direction).
+func (s *OfflineService) ClearBetween(userA, userB string) {
+	if s == nil || s.db == nil || userA == "" || userB == "" {
+		return
+	}
+	_ = s.db.Where(
+		"(from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)",
+		userA, userB, userB, userA,
+	).Delete(&model.OfflineMessage{}).Error
+}
+
 // Flush delivers all pending messages for userID (chronological) and deletes them.
 // Returns how many messages were pushed.
 func (s *OfflineService) Flush(userID string) int {

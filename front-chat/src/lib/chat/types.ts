@@ -163,7 +163,7 @@ export interface FriendRequest {
 
 export interface FriendEvent {
 	type: 'friend_event';
-	action: 'request' | 'accepted' | 'rejected' | 'removed' | 'blocked' | string;
+	action: 'request' | 'accepted' | 'rejected' | 'removed' | 'blocked' | 'unblocked' | string;
 	request_id?: number;
 	from_user_id?: string;
 	from_username?: string;

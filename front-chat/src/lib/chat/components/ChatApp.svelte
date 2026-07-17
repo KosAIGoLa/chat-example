@@ -425,6 +425,7 @@
 				}}
 				onRemoveFriend={async (uid) => {
 					await chat.removeFriend(uid);
+					toastInfo('已解除好友，私聊记录已清空', '好友');
 					if (targetUser === uid) targetUser = '';
 				}}
 				onBlockUser={async (opts) => {
@@ -433,6 +434,7 @@
 				}}
 				onUnblockUser={async (uid) => {
 					await chat.unblockUser(uid);
+					toastInfo('已取消拉黑，好友已回到名单（若仍是好友）', '黑名单');
 				}}
 				onCallUser={async (uid, name, media = 'audio') => {
 					await startCall(media, uid, name);

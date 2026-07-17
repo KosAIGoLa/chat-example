@@ -595,6 +595,58 @@ func (ns *NATSService) GetMessageHistory(subject string, count int) ([]dto.ChatM
 	return buf, nil
 }
 
+// PurgePrivatePair best-effort deletes JetStream messages between two users
+// on chat.private.<a> and chat.private.<b>.
+func (ns *NATSService) PurgePrivatePair(userA, userB string) {
+	if ns == nil || ns.js == nil || userA == "" || userB == "" {
+		return
+	}
+	subjects := []string{
+		fmt.Sprintf("chat.private.%s", userA),
+		fmt.Sprintf("chat.private.%s", userB),
+	}
+	for _, subject := range subjects {
+		ns.purgePrivateSubjectPair(subject, userA, userB)
+	}
+}
+
+func (ns *NATSService) purgePrivateSubjectPair(subject, userA, userB string) {
+	sub, err := ns.js.PullSubscribe(subject, "", nats.BindStream(streamName))
+	if err != nil {
+		log.Printf("[NATS] purge subscribe %s: %v", subject, err)
+		return
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// Drain matching messages (cap scans to avoid long hangs).
+	const maxRounds = 80
+	for round := 0; round < maxRounds; round++ {
+		msgs, err := sub.Fetch(100, nats.MaxWait(800*time.Millisecond))
+		if err != nil {
+			break
+		}
+		if len(msgs) == 0 {
+			break
+		}
+		for _, m := range msgs {
+			var chat dto.ChatMessageDTO
+			if err := json.Unmarshal(m.Data, &chat); err == nil && chat.Type == "private" {
+				pair :=
+					(chat.From == userA && chat.To == userB) ||
+						(chat.From == userB && chat.To == userA)
+				if pair {
+					if meta, err := m.Metadata(); err == nil && meta != nil {
+						if err := ns.js.DeleteMsg(streamName, meta.Sequence.Stream); err != nil {
+							// ignore individual delete failures
+						}
+					}
+				}
+			}
+			_ = m.Ack()
+		}
+	}
+}
+
 // GetPrivateHistory returns the conversation between two users.
 // Private messages are stored on chat.private.<recipient>, so we load both
 // directions and keep only messages exchanged between a and b.

@@ -175,6 +175,17 @@ func (s *MessageStore) EditedBodies(ids []string) (map[string]string, error) {
 	return out, nil
 }
 
+// DeletePrivatePair removes message_records for private chat between two users.
+func (s *MessageStore) DeletePrivatePair(userA, userB string) {
+	if s == nil || s.db == nil || userA == "" || userB == "" {
+		return
+	}
+	_ = s.db.Where(
+		"type = ? AND ((from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?))",
+		"private", userA, userB, userB, userA,
+	).Delete(&model.MessageRecord{}).Error
+}
+
 // SeqByIDs returns id → seq for the given message ids (only rows with seq > 0).
 func (s *MessageStore) SeqByIDs(ids []string) (map[string]int64, error) {
 	out := make(map[string]int64)

@@ -431,6 +431,10 @@ func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
 		myID := strconv.FormatUint(uint64(userIDRaw.(uint)), 10)
 		// Private scans two inboxes then filters to the pair — budget handled inside.
 		messages, err = ctrl.natsSvc.GetPrivateHistory(myID, peerID, pullLimit)
+		// After unfriend, hide history at-or-before cut-off (re-friend starts clean).
+		if err == nil && ctrl.chatSvc != nil {
+			messages = ctrl.chatSvc.FilterPrivateAfterCutoff(myID, peerID, messages)
+		}
 
 	case "group":
 		groupID, err := validate.GroupID(c.Query("group_id"), true)

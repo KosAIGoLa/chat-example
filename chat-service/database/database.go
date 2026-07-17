@@ -32,6 +32,7 @@ func Init() *gorm.DB {
 		&model.FriendRequest{},
 		&model.Friendship{},
 		&model.Blacklist{},
+		&model.PrivateConvCutoff{},
 		&model.Group{},
 		&model.GroupMember{},
 		&model.OfflineMessage{},

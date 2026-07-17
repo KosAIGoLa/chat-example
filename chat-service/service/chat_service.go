@@ -450,6 +450,24 @@ func (s *ChatService) EnrichSeq(messages []dto.ChatMessageDTO) []dto.ChatMessage
 	return messages
 }
 
+// FilterPrivateAfterCutoff drops private messages at-or-before unfriend cut-off.
+func (s *ChatService) FilterPrivateAfterCutoff(myID, peerID string, messages []dto.ChatMessageDTO) []dto.ChatMessageDTO {
+	if s == nil || s.friends == nil || len(messages) == 0 {
+		return messages
+	}
+	cut := s.friends.PrivateCutoffUnix(myID, peerID)
+	if cut <= 0 {
+		return messages
+	}
+	out := make([]dto.ChatMessageDTO, 0, len(messages))
+	for _, m := range messages {
+		if m.Timestamp > cut {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // ApplyRecalls marks recalled flags on history messages using the store.
 func (s *ChatService) ApplyRecalls(messages []dto.ChatMessageDTO) []dto.ChatMessageDTO {
 	if s.store == nil || len(messages) == 0 {

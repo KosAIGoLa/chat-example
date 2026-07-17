@@ -855,7 +855,7 @@
 												if (
 													await confirmDialog({
 														title: '解除好友',
-														message: `确定解除与 ${u.username || u.user_id} 的好友关系？`,
+														message: `确定解除与 ${u.username || u.user_id} 的好友关系？\n\n双方私聊记录将被清空；以后重新加好友也不会恢复旧消息。`,
 														confirmText: '解除',
 														danger: true
 													})
@@ -873,7 +873,7 @@
 												if (
 													await confirmDialog({
 														title: '拉黑用户',
-														message: `拉黑 ${u.username || u.user_id}？将解除好友，且无法互相邀请/私聊。`,
+														message: `拉黑 ${u.username || u.user_id}？\n\n· 不会解除好友关系（与「解除好友」不同）\n· 对方从好友列表隐藏，进入黑名单\n· 看不到对方消息，也无法私聊\n· 取消拉黑后若仍是好友会回到好友名单`,
 														confirmText: '拉黑',
 														danger: true
 													})
@@ -976,6 +976,9 @@
 							黑名单 · {blacklist.length}
 						</button>
 						{#if blacklistOpen}
+							<p class="text-muted-foreground/80 px-2 pb-1 text-[10px]">
+								拉黑≠解除好友；取消拉黑后好友会回到列表
+							</p>
 							<ul class="space-y-0.5 px-1 pt-1">
 								{#each blacklist as u (u.user_id)}
 									<li class="flex items-center gap-2 rounded-lg px-2 py-1.5">
@@ -987,11 +990,11 @@
 											variant="ghost"
 											size="sm"
 											class="h-7 px-2 text-xs"
-											title="取消拉黑"
+											title="取消拉黑（好友将回到名单）"
 											onclick={() => void onUnblockUser(u.user_id)}
 										>
 											<ShieldOff class="size-3.5" />
-											解除
+											取消拉黑
 										</Button>
 									</li>
 								{/each}

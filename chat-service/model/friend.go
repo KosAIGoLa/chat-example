@@ -28,10 +28,21 @@ type Friendship struct {
 }
 
 // Blacklist is one-way: UserID blocked BlockedUserID.
-// Blocks friend invites and private messages in both directions while active.
+// Does NOT remove Friendship — only hides the peer from my friend list UI and
+// blocks private chat / invites while active. Unblock restores friend list entry.
 type Blacklist struct {
 	ID            uint      `gorm:"primaryKey" json:"id"`
 	UserID        uint      `gorm:"index;not null;uniqueIndex:idx_blacklist_pair" json:"user_id"`
 	BlockedUserID uint      `gorm:"index;not null;uniqueIndex:idx_blacklist_pair" json:"blocked_user_id"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+// PrivateConvCutoff hides private history between a pair after unfriend.
+// UserAID < UserBID always (same ordering as Friendship).
+// History API only returns private messages with Timestamp > CutAt.
+// Re-adding as friends does not clear CutAt — conversation starts fresh.
+type PrivateConvCutoff struct {
+	UserAID uint  `gorm:"primaryKey;not null" json:"user_a_id"`
+	UserBID uint  `gorm:"primaryKey;not null" json:"user_b_id"`
+	CutAt   int64 `gorm:"not null" json:"cut_at"` // unix seconds
 }

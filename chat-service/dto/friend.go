@@ -30,7 +30,7 @@ type FriendInviteRequest struct {
 // type: "friend_event"
 type FriendEvent struct {
 	Type         string `json:"type"`   // "friend_event"
-	Action       string `json:"action"` // "request" | "accepted" | "rejected" | "removed" | "blocked"
+	Action       string `json:"action"` // "request" | "accepted" | "rejected" | "removed" | "blocked" | "unblocked"
 	RequestID    uint   `json:"request_id,omitempty"`
 	FromUserID   string `json:"from_user_id,omitempty"`
 	FromUsername string `json:"from_username,omitempty"`

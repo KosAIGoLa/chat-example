@@ -699,6 +699,15 @@ export function createChatController(opts: {
 
 	async function handleIncomingChat(msg: ChatMessage) {
 		const plain = await decryptMessage(msg);
+		// 拉黑：不展示对方消息（群聊/私聊），也不记未读。≠ 解除好友。
+		if (
+			plain.from &&
+			plain.from !== myUserId &&
+			isUserBlocked(String(plain.from)) &&
+			(plain.type === 'private' || plain.type === 'group')
+		) {
+			return;
+		}
 		updatePreview(plain);
 		// Any real chat message implies they stopped typing.
 		if (plain.from && plain.from !== myUserId) {
@@ -1151,17 +1160,47 @@ export function createChatController(opts: {
 							void refreshIncomingRequests();
 						} else if (fe.action === 'rejected') {
 							void refreshIncomingRequests();
-						} else if (fe.action === 'removed' || fe.action === 'blocked') {
+						} else if (fe.action === 'removed') {
+							// 解除好友：从好友列表消失；清空双方私聊本地缓存（与拉黑不同）。
+							void refreshFriends();
+							void refreshIncomingRequests();
+							const peer =
+								fe.from_user_id === myUserId ? fe.to_user_id : fe.from_user_id;
+							if (peer) {
+								clearConvCache(convKeyPrivate(String(peer)));
+								const nextPrev = { ...lastPreviews };
+								delete nextPrev[`private:${peer}`];
+								lastPreviews = nextPrev;
+								const nextUnread = { ...unreadPeers };
+								delete nextUnread[peer];
+								unreadPeers = nextUnread;
+								if (chatMode === 'private' && targetUser === peer) {
+									messages = [];
+									targetUser = '';
+									loadedKey = '';
+								}
+							}
+						} else if (fe.action === 'blocked') {
+							// 拉黑：保留好友关系，仅从我的好友列表隐藏；屏蔽其消息。
 							void refreshFriends();
 							void refreshIncomingRequests();
 							void refreshBlacklist();
-							// Close private chat if peer was removed/blocked.
 							const peer =
 								fe.from_user_id === myUserId ? fe.to_user_id : fe.from_user_id;
-							if (peer && chatMode === 'private' && targetUser === peer) {
+							// 我拉黑对方时关闭与对方的私聊窗口；被拉黑方仍可看到我为好友。
+							if (
+								peer &&
+								fe.from_user_id === myUserId &&
+								chatMode === 'private' &&
+								targetUser === peer
+							) {
 								messages = [];
 								targetUser = '';
 							}
+						} else if (fe.action === 'unblocked') {
+							// 取消拉黑：好友关系仍在则回到好友列表。
+							void refreshFriends();
+							void refreshBlacklist();
 						}
 						return;
 					}
@@ -1465,12 +1504,24 @@ export function createChatController(opts: {
 		incomingRequests = incomingRequests.filter((r) => r.id !== id);
 	}
 
+	/** 解除好友：双方私聊历史服务端清空；本机缓存/预览一并清掉。重新加好友从空白开始。 */
 	async function removeFriend(userId: string) {
-		await friendService.remove(userId);
-		friends = friends.filter((f) => f.user_id !== userId);
-		if (chatMode === 'private' && targetUser === userId) {
+		const uid = String(userId ?? '').trim();
+		if (!uid) return;
+		await friendService.remove(uid);
+		friends = friends.filter((f) => f.user_id !== uid);
+		// Local history + sidebar preview for this private conversation.
+		clearConvCache(convKeyPrivate(uid));
+		const nextPrev = { ...lastPreviews };
+		delete nextPrev[`private:${uid}`];
+		lastPreviews = nextPrev;
+		const nextUnread = { ...unreadPeers };
+		delete nextUnread[uid];
+		unreadPeers = nextUnread;
+		if (chatMode === 'private' && targetUser === uid) {
 			messages = [];
 			targetUser = '';
+			loadedKey = '';
 		}
 	}
 
@@ -1486,25 +1537,51 @@ export function createChatController(opts: {
 		}
 	}
 
-	/** 拉黑：解除好友 + 进黑名单 */
+	/** 拉黑：保留好友关系；好友列表隐藏；屏蔽对方消息（≠ 解除好友）。 */
 	async function blockUser(opts: { user_id?: string; username?: string }) {
 		const entry = await friendService.block(opts);
 		const uid = entry.user_id;
+		// UI: hide from friends (server ListFriends also filters IBlocked).
 		friends = friends.filter((f) => f.user_id !== uid);
 		incomingRequests = incomingRequests.filter(
 			(r) => r.from_user_id !== uid && r.to_user_id !== uid
 		);
 		await refreshBlacklist();
+		// Drop any visible bubbles from this user in the open conversation.
 		if (chatMode === 'private' && targetUser === uid) {
 			messages = [];
 			targetUser = '';
+		} else if (chatMode === 'group') {
+			messages = messages.filter((m) => m.from !== uid);
 		}
 		return entry;
 	}
 
+	/** 取消拉黑：若仍是好友则重新出现在好友名单。 */
 	async function unblockUser(userId: string) {
 		await friendService.unblock(userId);
 		blacklist = blacklist.filter((u) => u.user_id !== userId);
+		// Friendship was kept — peer reappears on friend list.
+		await refreshFriends();
+	}
+
+	/** True if I blocked this user (one-way). */
+	function isUserBlocked(userId: string): boolean {
+		const uid = String(userId ?? '').trim();
+		if (!uid) return false;
+		return blacklist.some((b) => b.user_id === uid);
+	}
+
+	/** Drop chat bubbles from people I blocked (history + live). */
+	function filterBlockedMessages(list: ChatMessage[]): ChatMessage[] {
+		if (!list.length || !blacklist.length) return list;
+		const blocked = new Set(blacklist.map((b) => b.user_id));
+		return list.filter((m) => {
+			if (!m.from || m.from === myUserId) return true;
+			if (m.content_type === 'system') return true;
+			if (m.type !== 'private' && m.type !== 'group') return true;
+			return !blocked.has(m.from);
+		});
 	}
 
 	async function reloadActiveHistory() {
@@ -1545,7 +1622,9 @@ export function createChatController(opts: {
 		let base: ChatMessage[];
 		let paintedFromCache = false;
 		if (cached?.messages?.length) {
-			const cachedMsgs = sortMessagesBySeq([...cached.messages]);
+			const cachedMsgs = sortMessagesBySeq(
+				filterBlockedMessages([...cached.messages])
+			);
 			if (switching || messages.length === 0) {
 				base = cachedMsgs;
 				messages = base;
@@ -1562,7 +1641,7 @@ export function createChatController(opts: {
 			messages = [];
 			base = [];
 		} else {
-			base = [...messages];
+			base = filterBlockedMessages([...messages]);
 		}
 
 		// Show spinner only when we have nothing to show yet.
@@ -1579,11 +1658,11 @@ export function createChatController(opts: {
 
 			const rawList = (res.messages ?? []).filter(isChatContent);
 			// Decrypt only what is still ciphertext (cache is already plain).
-			const list = await decryptMessages(rawList);
+			const list = filterBlockedMessages(await decryptMessages(rawList));
 			if (epoch !== historyEpoch) return;
 
 			if (list.length > 0) {
-				const merged = mergeById(base, list);
+				const merged = filterBlockedMessages(mergeById(base, list));
 				messages = merged;
 				for (const m of list) updatePreview(m);
 				const maxSeq = Math.max(sinceSeq, res.max_seq ?? 0, maxSeqOf(merged));

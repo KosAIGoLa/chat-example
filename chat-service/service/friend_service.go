@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"ws-ex/dto"
 	"ws-ex/model"
@@ -14,12 +16,30 @@ import (
 
 // FriendService manages invites and the accepted friend list.
 type FriendService struct {
-	db  *gorm.DB
-	hub *Hub
+	db      *gorm.DB
+	hub     *Hub
+	offline *OfflineService
+	nats    *NATSService
+	store   *MessageStore
 }
 
 func NewFriendService(db *gorm.DB, hub *Hub) *FriendService {
 	return &FriendService{db: db, hub: hub}
+}
+
+// SetOffline wires offline inbox cleanup on unfriend.
+func (s *FriendService) SetOffline(o *OfflineService) {
+	s.offline = o
+}
+
+// SetNATS wires JetStream private history purge on unfriend.
+func (s *FriendService) SetNATS(ns *NATSService) {
+	s.nats = ns
+}
+
+// SetMessageStore wires message metadata cleanup on unfriend.
+func (s *FriendService) SetMessageStore(ms *MessageStore) {
+	s.store = ms
 }
 
 func uidStr(id uint) string {
@@ -216,6 +236,8 @@ func (s *FriendService) RejectRequest(me uint, requestID uint) (*dto.FriendReque
 }
 
 // ListFriends returns accepted friends with online flag.
+// Peers I blocked are omitted here (they appear on the blacklist instead);
+// friendship rows are kept so Unblock restores them to this list.
 func (s *FriendService) ListFriends(me uint) ([]dto.FriendUserDTO, error) {
 	var rows []model.Friendship
 	if err := s.db.Where("user_a_id = ? OR user_b_id = ?", me, me).Find(&rows).Error; err != nil {
@@ -232,6 +254,13 @@ func (s *FriendService) ListFriends(me uint) ([]dto.FriendUserDTO, error) {
 	if len(ids) == 0 {
 		return []dto.FriendUserDTO{}, nil
 	}
+	// One-way: hide people I blocked (not people who blocked me).
+	var blockedRows []model.Blacklist
+	_ = s.db.Select("blocked_user_id").Where("user_id = ?", me).Find(&blockedRows).Error
+	blocked := make(map[uint]bool, len(blockedRows))
+	for _, b := range blockedRows {
+		blocked[b.BlockedUserID] = true
+	}
 	var users []model.User
 	if err := s.db.Where("id IN ?", ids).Find(&users).Error; err != nil {
 		return nil, err
@@ -242,6 +271,9 @@ func (s *FriendService) ListFriends(me uint) ([]dto.FriendUserDTO, error) {
 	}
 	out := make([]dto.FriendUserDTO, 0, len(ids))
 	for _, id := range ids {
+		if blocked[id] {
+			continue
+		}
 		u, ok := byID[id]
 		if !ok {
 			continue
@@ -277,7 +309,8 @@ func (s *FriendService) ListOutgoing(me uint) ([]dto.FriendRequestDTO, error) {
 	return s.mapRequests(rows)
 }
 
-// RemoveFriend deletes the friendship pair and cleans request rows.
+// RemoveFriend deletes the friendship pair, cleans request rows, and clears
+// private conversation history so re-adding friends starts with an empty chat.
 // Returns peer user id string for live notify.
 func (s *FriendService) RemoveFriend(me, peer uint) (peerID string, err error) {
 	if me == peer {
@@ -296,10 +329,59 @@ func (s *FriendService) RemoveFriend(me, peer uint) (peerID string, err error) {
 		"(from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)",
 		me, peer, peer, me,
 	).Delete(&model.FriendRequest{}).Error
+
+	// Wipe private history between the pair (server + offline inbox).
+	s.ClearPrivateConversation(me, peer)
 	return uidStr(peer), nil
 }
 
-// BlockUser adds peer to my blacklist, removes friendship, and cancels pending invites.
+// ClearPrivateConversation marks a history cutoff and purges durable private data
+// so neither side sees old messages after unfriend / re-friend.
+func (s *FriendService) ClearPrivateConversation(a, b uint) {
+	if s == nil || s.db == nil || a == 0 || b == 0 || a == b {
+		return
+	}
+	ua, ub := orderedPair(a, b)
+	cutAt := time.Now().Unix()
+	row := model.PrivateConvCutoff{UserAID: ua, UserBID: ub, CutAt: cutAt}
+	_ = s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "user_a_id"}, {Name: "user_b_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"cut_at"}),
+	}).Create(&row).Error
+
+	aStr, bStr := uidStr(a), uidStr(b)
+	if s.offline != nil {
+		s.offline.ClearBetween(aStr, bStr)
+	}
+	if s.nats != nil {
+		s.nats.PurgePrivatePair(aStr, bStr)
+	}
+	if s.store != nil {
+		s.store.DeletePrivatePair(aStr, bStr)
+	}
+}
+
+// PrivateCutoffUnix returns CutAt for the pair (0 if none).
+func (s *FriendService) PrivateCutoffUnix(a, b string) int64 {
+	if s == nil || s.db == nil {
+		return 0
+	}
+	ua, err1 := parseUID(a)
+	ub, err2 := parseUID(b)
+	if err1 != nil || err2 != nil || ua == ub {
+		return 0
+	}
+	min, max := orderedPair(ua, ub)
+	var row model.PrivateConvCutoff
+	if err := s.db.Where("user_a_id = ? AND user_b_id = ?", min, max).First(&row).Error; err != nil {
+		return 0
+	}
+	return row.CutAt
+}
+
+// BlockUser adds peer to my blacklist.
+// Friendship is KEPT (unlike RemoveFriend). Pending invites between the pair are cancelled.
+// Private messaging is blocked while blacklisted; ListFriends hides the peer until Unblock.
 func (s *FriendService) BlockUser(me uint, username, userIDStr string) (*dto.BlacklistUserDTO, error) {
 	peer, err := s.resolveUser(username, userIDStr)
 	if err != nil {
@@ -311,10 +393,7 @@ func (s *FriendService) BlockUser(me uint, username, userIDStr string) (*dto.Bla
 	if s.IBlocked(me, peer.ID) {
 		return s.toBlacklistDTO(me, peer.ID)
 	}
-	// Drop friendship if any.
-	ua, ub := orderedPair(me, peer.ID)
-	_ = s.db.Where("user_a_id = ? AND user_b_id = ?", ua, ub).Delete(&model.Friendship{})
-	// Drop pending/any requests either way.
+	// Keep friendship. Only cancel open invites so neither side can re-invite while blocked.
 	_ = s.db.Where(
 		"(from_user_id = ? AND to_user_id = ?) OR (from_user_id = ? AND to_user_id = ?)",
 		me, peer.ID, peer.ID, me,
@@ -332,6 +411,7 @@ func (s *FriendService) BlockUser(me uint, username, userIDStr string) (*dto.Bla
 }
 
 // UnblockUser removes peer from my blacklist.
+// If they were friends, they reappear on ListFriends (friendship was never deleted).
 func (s *FriendService) UnblockUser(me, peer uint) error {
 	if me == peer {
 		return errors.New("invalid peer")

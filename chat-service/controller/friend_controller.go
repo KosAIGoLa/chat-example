@@ -159,6 +159,8 @@ func (ctrl *FriendController) RejectRequest(c *gin.Context) {
 }
 
 // RemoveFriend DELETE /api/friends/:user_id — 解除好友关系
+// Also clears private chat history between the pair (server + both clients via event).
+// Re-adding as friends starts with an empty conversation.
 func (ctrl *FriendController) RemoveFriend(c *gin.Context) {
 	peer, err := strconv.ParseUint(c.Param("user_id"), 10, 64)
 	if err != nil {
@@ -173,13 +175,14 @@ func (ctrl *FriendController) RemoveFriend(c *gin.Context) {
 	}
 	meStr := strconv.FormatUint(uint64(me), 10)
 	ev := dto.FriendEvent{
+		Type:       "friend_event",
 		Action:     "removed",
 		FromUserID: meStr,
 		ToUserID:   peerID,
 	}
 	ctrl.friends.PushFriendEvent(meStr, ev)
 	ctrl.friends.PushFriendEvent(peerID, ev)
-	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "friend removed"})
+	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "friend removed; private history cleared"})
 }
 
 // ListBlacklist GET /api/friends/blacklist
@@ -196,7 +199,8 @@ func (ctrl *FriendController) ListBlacklist(c *gin.Context) {
 }
 
 // BlockUser POST /api/friends/blacklist  {username|user_id}
-// 拉黑：解除好友 + 取消双向邀请 + 禁止私聊/邀请
+// 拉黑：保留好友关系；好友列表隐藏对方；屏蔽私聊与邀请；取消拉黑后回到好友列表。
+// （与「解除好友」不同：解除会删除 Friendship。）
 func (ctrl *FriendController) BlockUser(c *gin.Context) {
 	var body dto.BlockUserRequest
 	if err := c.ShouldBindJSON(&body); err != nil {
@@ -232,26 +236,38 @@ func (ctrl *FriendController) BlockUser(c *gin.Context) {
 	}
 	meStr := strconv.FormatUint(uint64(me), 10)
 	ev := dto.FriendEvent{
+		Type:       "friend_event",
 		Action:     "blocked",
 		FromUserID: meStr,
 		ToUserID:   entry.UserID,
 	}
-	// Notify both sides to refresh friend lists (blocked user loses friendship).
+	// Me: refresh friend list (peer hidden) + blacklist. Peer: no friendship loss.
 	ctrl.friends.PushFriendEvent(meStr, ev)
 	ctrl.friends.PushFriendEvent(entry.UserID, ev)
 	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "user blocked", Data: entry})
 }
 
 // UnblockUser DELETE /api/friends/blacklist/:user_id
+// 取消拉黑：好友关系若仍在则重新出现在好友列表。
 func (ctrl *FriendController) UnblockUser(c *gin.Context) {
 	peer, err := strconv.ParseUint(c.Param("user_id"), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "invalid user_id"})
 		return
 	}
-	if err := ctrl.friends.UnblockUser(ctrl.me(c), uint(peer)); err != nil {
+	me := ctrl.me(c)
+	if err := ctrl.friends.UnblockUser(me, uint(peer)); err != nil {
 		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
 	}
+	meStr := strconv.FormatUint(uint64(me), 10)
+	peerStr := strconv.FormatUint(peer, 10)
+	ev := dto.FriendEvent{
+		Type:       "friend_event",
+		Action:     "unblocked",
+		FromUserID: meStr,
+		ToUserID:   peerStr,
+	}
+	ctrl.friends.PushFriendEvent(meStr, ev)
 	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "user unblocked"})
 }
