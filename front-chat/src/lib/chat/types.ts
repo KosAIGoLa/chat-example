@@ -229,7 +229,17 @@ export interface OnlineUser {
 	username: string;
 }
 
-/** Group roster pushed over WebSocket or loaded via REST. */
+/** Durable group member with role + presence (GET /api/groups/:id/members). */
+export interface GroupMember {
+	user_id: string;
+	username: string;
+	/** owner | admin | member */
+	role: 'owner' | 'admin' | 'member' | string;
+	/** WebSocket connected */
+	online: boolean;
+}
+
+/** Group roster pushed over WebSocket (room presence — may be partial). */
 export interface GroupMembersEvent {
 	type: 'group_members';
 	group_id: string;
@@ -238,19 +248,26 @@ export interface GroupMembersEvent {
 
 export interface GroupMembersResponse {
 	group_id: string;
-	members: OnlineUser[];
+	members: GroupMember[];
 	count: number;
+	online_count?: number;
 }
 
-/** Durable group from GET /api/groups. */
+/** Durable group from GET /api/groups or search. */
 export interface GroupInfo {
 	id: string;
 	name: string;
 	owner_user_id: string;
 	owner_username?: string;
-	role?: 'owner' | 'member' | string;
+	/** Caller's role in this group: owner | admin | member */
+	role?: 'owner' | 'admin' | 'member' | string;
 	member_count?: number;
 	created_at?: number;
+	/** Present on search results. */
+	is_member?: boolean;
+	/** Group icon path e.g. /api/group-avatar/{id} */
+	avatar?: string;
+	avatar_rev?: number;
 }
 
 /** Server push when owner dissolves a group. */
@@ -271,6 +288,12 @@ export interface HistoryResponse {
 	count: number;
 	/** Highest seq in this response (0 if none / legacy). */
 	max_seq?: number;
+	/** Lowest positive seq in this response (for scroll-up cursor). */
+	min_seq?: number;
 	/** Echo of the since_seq query used for the request. */
 	since_seq?: number;
+	/** Echo of before_seq (older-page cursor). */
+	before_seq?: number;
+	/** True when more older messages exist beyond this page. */
+	has_more?: boolean;
 }

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { ChatMessage } from '../types';
 	import { parseRedPacketContent } from '../utils';
-	import { redPacketService, type RedPacket } from '$lib/api';
+	import { redPacketService, type RedPacket } from '$lib/api/red-packet.service';
 	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
 	import X from '@lucide/svelte/icons/x';
 	import { cn } from '$lib/utils';

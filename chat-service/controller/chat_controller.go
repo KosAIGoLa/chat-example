@@ -14,6 +14,7 @@ import (
 	"ws-ex/dto"
 	"ws-ex/model"
 	"ws-ex/service"
+	"ws-ex/validate"
 )
 
 var upgrader = websocket.Upgrader{
@@ -154,12 +155,9 @@ func (ctrl *ChatController) HandleWebSocket(c *gin.Context) {
 func (ctrl *ChatController) JoinGroup(c *gin.Context) {
 	userIDRaw, _ := c.Get("user_id")
 	userID := strconv.FormatUint(uint64(userIDRaw.(uint)), 10)
-	groupID := c.Query("group_id")
-	if groupID == "" {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{
-			Code:    400,
-			Message: "group_id is required",
-		})
+	groupID, err := validate.GroupID(c.Query("group_id"), true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
 	}
 
@@ -186,12 +184,9 @@ func (ctrl *ChatController) JoinGroup(c *gin.Context) {
 func (ctrl *ChatController) LeaveGroup(c *gin.Context) {
 	userIDRaw, _ := c.Get("user_id")
 	userID := strconv.FormatUint(uint64(userIDRaw.(uint)), 10)
-	groupID := c.Query("group_id")
-	if groupID == "" {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{
-			Code:    400,
-			Message: "group_id is required",
-		})
+	groupID, err := validate.GroupID(c.Query("group_id"), true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
 	}
 
@@ -213,33 +208,69 @@ func (ctrl *ChatController) LeaveGroup(c *gin.Context) {
 	})
 }
 
-// GetGroupMembers returns users currently in a group (connected + joined).
-// The caller is excluded so the list never contains yourself.
+// GetGroupMembers returns the full durable member roster for a group:
+// user_id, username, role (owner|member), online (WS connected).
+// Includes the caller so the UI can show "我 · 群主 · 在线".
 // GET /api/groups/:group_id/members
 func (ctrl *ChatController) GetGroupMembers(c *gin.Context) {
-	groupID := c.Param("group_id")
-	if groupID == "" {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{
-			Code:    400,
-			Message: "group_id is required",
-		})
+	groupID, err := validate.GroupID(c.Param("group_id"), true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
 	}
-	me := ""
+
+	// Only members may list the roster.
 	if userIDRaw, ok := c.Get("user_id"); ok {
-		me = strconv.FormatUint(uint64(userIDRaw.(uint)), 10)
+		uid := userIDRaw.(uint)
+		if gs := ctrl.chatSvc.Groups(); gs != nil && !gs.IsMember(uid, groupID) {
+			c.JSON(http.StatusForbidden, dto.APIResponseDTO{
+				Code: 403, Message: "not a group member",
+			})
+			return
+		}
 	}
-	members := ctrl.hub.GetGroupMemberInfos(groupID, me)
+
+	// Build online set: local hub (live WS only) + fresh remote presence.
+	onlineSet := map[string]bool{}
+	for _, uid := range ctrl.hub.GetOnlineUsers() {
+		onlineSet[uid] = true
+	}
+	if ctrl.natsSvc != nil {
+		if remote, err := ctrl.natsSvc.GetRemoteOnlineUsers(45 * time.Second); err == nil {
+			for _, u := range remote {
+				if u.UserID != "" {
+					onlineSet[u.UserID] = true
+				}
+			}
+		}
+	}
+
+	members, err := ctrl.chatSvc.ListGroupMembers(groupID, func(uid string) bool {
+		return onlineSet[uid]
+	})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
 	if members == nil {
-		members = []dto.OnlineUserDTO{}
+		members = []dto.GroupMemberDTO{}
 	}
+
+	onlineCount := 0
+	for _, m := range members {
+		if m.Online {
+			onlineCount++
+		}
+	}
+
 	c.JSON(http.StatusOK, dto.APIResponseDTO{
 		Code:    200,
 		Message: "success",
 		Data: gin.H{
-			"group_id": groupID,
-			"members":  members,
-			"count":    len(members),
+			"group_id":     groupID,
+			"members":      members,
+			"count":        len(members),
+			"online_count": onlineCount,
 		},
 	})
 }
@@ -261,7 +292,8 @@ func (ctrl *ChatController) GetOnlineUsers(c *gin.Context) {
 	}
 
 	// Merge only remote-instance presence; never re-add local KV leftovers.
-	if remote, err := ctrl.natsSvc.GetRemoteOnlineUsers(90 * time.Second); err == nil {
+	// maxAge 45s matches presence heartbeat (30s) + small slack.
+	if remote, err := ctrl.natsSvc.GetRemoteOnlineUsers(45 * time.Second); err == nil {
 		for _, u := range remote {
 			if u.UserID == me {
 				continue
@@ -321,68 +353,96 @@ func (ctrl *ChatController) GetAllPresence(c *gin.Context) {
 	})
 }
 
-// GetMessageHistory retrieves recent message history from JetStream.
+// GetMessageHistory retrieves message history from JetStream (up to stream MaxAge ≈ 6 months).
 //
 // Group:   GET /api/history?type=group&group_id=<id>&count=50
 // Private: GET /api/history?type=private&peer_id=<userID>&count=50
-// Legacy:  GET /api/history?subject=chat.group.<id>&count=50
+//
+// Cursors:
+//   - since_seq / since_ts  → only newer messages (incremental sync)
+//   - before_seq / before_ts → only older messages (scroll-up pagination)
+//
+// Response includes has_more so the client can keep loading older pages.
 func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
-	count := 50
-	if n := c.Query("count"); n != "" {
-		if v, err := strconv.Atoi(n); err == nil && v > 0 && v <= 500 {
-			count = v
-		}
+	count, err := validate.Limit(c.Query("count"), 80, 500)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
 	}
 
-	var (
-		messages []dto.ChatMessageDTO
-		err      error
-	)
+	var messages []dto.ChatMessageDTO
 
-	var sinceTS int64
-	if s := c.Query("since_ts"); s != "" {
-		if v, err := strconv.ParseInt(s, 10, 64); err == nil && v > 0 {
-			sinceTS = v
-		}
+	sinceTS, err := validate.NonNegInt64(c.Query("since_ts"), "since_ts")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
 	}
-	// Preferred incremental cursor: only messages with seq > since_seq.
-	var sinceSeq int64
-	if s := c.Query("since_seq"); s != "" {
-		if v, err := strconv.ParseInt(s, 10, 64); err == nil && v > 0 {
-			sinceSeq = v
-		}
+	sinceSeq, err := validate.NonNegInt64(c.Query("since_seq"), "since_seq")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
 	}
-
-	// When fetching deltas, pull a larger window so filter still has enough.
-	fetchCount := count
-	if sinceSeq > 0 || sinceTS > 0 {
-		if fetchCount < 200 {
-			fetchCount = 200
-		}
+	beforeSeq, err := validate.NonNegInt64(c.Query("before_seq"), "before_seq")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+	beforeTS, err := validate.NonNegInt64(c.Query("before_ts"), "before_ts")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
 	}
 
-	switch c.Query("type") {
+	// Pull budget: never full multi-month dump. Enough for page + filter headroom.
+	// before_seq needs a wider window; latest/delta stay small and fast.
+	pullLimit := count * 4
+	if beforeSeq > 0 || beforeTS > 0 {
+		pullLimit = count * 20
+		if pullLimit < 400 {
+			pullLimit = 400
+		}
+	} else if sinceSeq > 0 || sinceTS > 0 {
+		pullLimit = count * 8
+		if pullLimit < 200 {
+			pullLimit = 200
+		}
+	}
+	if pullLimit > 2500 {
+		pullLimit = 2500
+	}
+	if pullLimit < count {
+		pullLimit = count
+	}
+
+	histType, err := validate.HistoryType(c.Query("type"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+
+	switch histType {
 	case "private":
-		peerID := c.Query("peer_id")
-		if peerID == "" {
-			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "peer_id is required for private history"})
+		peerID, err := validate.PeerID(c.Query("peer_id"), true)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 			return
 		}
 		userIDRaw, _ := c.Get("user_id")
 		myID := strconv.FormatUint(uint64(userIDRaw.(uint)), 10)
-		messages, err = ctrl.natsSvc.GetPrivateHistory(myID, peerID, fetchCount)
+		// Private scans two inboxes then filters to the pair — budget handled inside.
+		messages, err = ctrl.natsSvc.GetPrivateHistory(myID, peerID, pullLimit)
 
 	case "group":
-		groupID := c.Query("group_id")
-		if groupID == "" {
-			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "group_id is required for group history"})
+		groupID, err := validate.GroupID(c.Query("group_id"), true)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 			return
 		}
-		messages, err = ctrl.natsSvc.GetMessageHistory(fmt.Sprintf("chat.group.%s", groupID), fetchCount)
+		messages, err = ctrl.natsSvc.GetMessageHistory(fmt.Sprintf("chat.group.%s", groupID), pullLimit)
 
 	default:
-		// Backward-compatible subject filter.
-		subject := c.Query("subject")
+		// Backward-compatible subject filter — only allow known chat subjects.
+		subject := validate.CleanSingleLine(c.Query("subject"))
 		if subject == "" {
 			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{
 				Code:    400,
@@ -390,7 +450,15 @@ func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
 			})
 			return
 		}
-		messages, err = ctrl.natsSvc.GetMessageHistory(subject, fetchCount)
+		if !strings.HasPrefix(subject, "chat.private.") && !strings.HasPrefix(subject, "chat.group.") {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "invalid subject"})
+			return
+		}
+		if len(subject) > 128 {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "subject too long"})
+			return
+		}
+		messages, err = ctrl.natsSvc.GetMessageHistory(subject, pullLimit)
 	}
 
 	if err != nil {
@@ -401,11 +469,14 @@ func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
 		messages = []dto.ChatMessageDTO{}
 	}
 	// Fill seq from Postgres for JetStream payloads that predate seq-on-wire,
-	// then sort + filter so since_seq works for backfilled records.
+	// then sort + filter so since_seq / before_seq work for backfilled records.
 	messages = ctrl.chatSvc.EnrichSeq(messages)
 	service.SortChatMessages(messages)
-	// Incremental sync: prefer since_seq; fall back to since_ts for older clients.
-	if sinceSeq > 0 {
+
+	// Mutually exclusive cursors: before_* for older pages; since_* for new deltas.
+	if beforeSeq > 0 || beforeTS > 0 {
+		messages = service.FilterBeforeSeq(messages, beforeSeq, beforeTS)
+	} else if sinceSeq > 0 {
 		messages = service.FilterSinceSeq(messages, sinceSeq)
 	} else if sinceTS > 0 {
 		filtered := make([]dto.ChatMessageDTO, 0, len(messages))
@@ -416,21 +487,30 @@ func (ctrl *ChatController) GetMessageHistory(c *gin.Context) {
 		}
 		messages = filtered
 	}
-	// Cap response size after filter (latest `count` by order).
+
+	// Cap to page size: always the latest `count` of the filtered set
+	// (for before_seq this is the newest slice of older history — correct for prepend).
+	hasMore := false
 	if len(messages) > count {
+		hasMore = true
 		messages = messages[len(messages)-count:]
 	}
+
 	// Mask recalled messages for history viewers.
 	messages = ctrl.chatSvc.ApplyRecalls(messages)
 	maxSeq := service.MaxSeq(messages)
+	minSeq := service.MinSeq(messages)
 	c.JSON(http.StatusOK, dto.APIResponseDTO{
 		Code:    200,
 		Message: "success",
 		Data: gin.H{
-			"messages":  messages,
-			"count":     len(messages),
-			"max_seq":   maxSeq,
-			"since_seq": sinceSeq,
+			"messages":   messages,
+			"count":      len(messages),
+			"max_seq":    maxSeq,
+			"min_seq":    minSeq,
+			"since_seq":  sinceSeq,
+			"before_seq": beforeSeq,
+			"has_more":   hasMore,
 		},
 	})
 }

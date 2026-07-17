@@ -7,7 +7,12 @@
 import type { ChatMessage } from './types';
 
 const CACHE_PREFIX = 'chat_hist_v1:';
-const MAX_CACHED = 200;
+/**
+ * Cap localStorage payload size. Too large (thousands) makes every send/open
+ * JSON.stringify + localStorage.setItem noticeably slow.
+ * Older history is still available via server scroll-up (before_seq).
+ */
+const MAX_CACHED = 400;
 
 export interface ConvCache {
 	/** Conversation key */
@@ -75,7 +80,10 @@ export function saveConvCache(convKey: string, messages: ChatMessage[], maxSeq?:
 }
 
 function stripClientOnly(m: ChatMessage): ChatMessage {
-	const { send_status: _s, _local_plain: _p, ...rest } = m;
+	// Drop client-only fields before localStorage persist.
+	const rest = { ...m };
+	delete rest.send_status;
+	delete rest._local_plain;
 	return rest;
 }
 
@@ -86,6 +94,57 @@ export function maxSeqOf(messages: ChatMessage[]): number {
 		if (s > max) max = s;
 	}
 	return max;
+}
+
+/** Lowest positive seq (0 if none). Used as before_seq when loading older pages. */
+export function minSeqOf(messages: ChatMessage[]): number {
+	let min = 0;
+	for (const m of messages) {
+		const s = Number(m.seq) || 0;
+		if (s <= 0) continue;
+		if (min === 0 || s < min) min = s;
+	}
+	return min;
+}
+
+export function minTimestampOf(messages: ChatMessage[]): number {
+	let min = 0;
+	for (const m of messages) {
+		const t = Number(m.timestamp) || 0;
+		if (t <= 0) continue;
+		if (min === 0 || t < min) min = t;
+	}
+	return min;
+}
+
+/** Remove one conversation cache entry. */
+export function clearConvCache(convKey: string): void {
+	if (typeof window === 'undefined' || !convKey) return;
+	try {
+		localStorage.removeItem(storageKey(convKey));
+	} catch {
+		// ignore
+	}
+}
+
+/** Remove all chat history caches on this device. */
+export function clearAllConvCaches(): number {
+	if (typeof window === 'undefined') return 0;
+	let n = 0;
+	try {
+		const keys: string[] = [];
+		for (let i = 0; i < localStorage.length; i++) {
+			const k = localStorage.key(i);
+			if (k && k.startsWith(CACHE_PREFIX)) keys.push(k);
+		}
+		for (const k of keys) {
+			localStorage.removeItem(k);
+			n++;
+		}
+	} catch {
+		// ignore
+	}
+	return n;
 }
 
 /** Sort ascending by seq (prefer), then timestamp, then id. */

@@ -1,4 +1,5 @@
 <script lang="ts" module>
+	/* eslint-disable svelte/no-navigation-without-resolve -- generic Button may take external or relative href */
 	import { cn, type WithElementRef } from "$lib/utils.js";
 	import type { HTMLAnchorAttributes, HTMLButtonAttributes } from "svelte/elements";
 	import { type VariantProps, tv } from "tailwind-variants";

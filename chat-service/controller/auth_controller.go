@@ -10,6 +10,7 @@ import (
 	"ws-ex/dto"
 	"ws-ex/model"
 	"ws-ex/service"
+	"ws-ex/validate"
 )
 
 type AuthController struct {
@@ -49,13 +50,22 @@ func (ctrl *AuthController) Register(c *gin.Context) {
 	var req dto.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{
-			Code:    400,
-			Message: err.Error(),
+			Code: 400, Message: validate.JSONBody(err).Error(),
 		})
 		return
 	}
+	username, err := validate.Username(req.Username)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+	password, err := validate.Password(req.Password, true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
 
-	user, err := ctrl.authSvc.Register(req.Username, req.Password)
+	user, err := ctrl.authSvc.Register(username, password)
 	if err != nil {
 		c.JSON(http.StatusConflict, dto.APIResponseDTO{
 			Code:    409,
@@ -75,13 +85,22 @@ func (ctrl *AuthController) Login(c *gin.Context) {
 	var req dto.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{
-			Code:    400,
-			Message: err.Error(),
+			Code: 400, Message: validate.JSONBody(err).Error(),
 		})
 		return
 	}
+	username, err := validate.LoginIdentity(req.Username)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+	password, err := validate.Password(req.Password, true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
 
-	token, user, err := ctrl.authSvc.Login(req.Username, req.Password)
+	token, user, err := ctrl.authSvc.Login(username, password)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, dto.APIResponseDTO{
 			Code:    401,
@@ -131,6 +150,16 @@ func (ctrl *AuthController) UpdateProfile(c *gin.Context) {
 
 	var req dto.UpdateProfileRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: validate.JSONBody(err).Error()})
+		return
+	}
+	username, err := validate.Username(req.Username)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+	password, err := validate.Password(req.Password, false)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
 	}
@@ -138,8 +167,8 @@ func (ctrl *AuthController) UpdateProfile(c *gin.Context) {
 	uid := userIDRaw.(uint)
 	token, user, err := ctrl.authSvc.UpdateProfile(
 		uid,
-		req.Username,
-		req.Password,
+		username,
+		password,
 		req.CurrentPassword,
 	)
 	if err != nil {

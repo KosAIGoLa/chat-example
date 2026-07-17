@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -15,9 +15,8 @@ import (
 
 	"ws-ex/dto"
 	"ws-ex/model"
+	"ws-ex/validate"
 )
-
-var groupIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{3,64}$`)
 
 // GroupService persists groups and durable memberships.
 type GroupService struct {
@@ -42,29 +41,35 @@ func genGroupID() string {
 }
 
 // Create creates a group; creator becomes owner and durable member.
+// name is required and validated; customID optional (validated or auto-generated).
 func (s *GroupService) Create(ownerID uint, name, customID string) (*dto.GroupDTO, error) {
-	name = strings.TrimSpace(name)
-	customID = strings.TrimSpace(customID)
-
-	var id string
-	if customID != "" {
-		if !groupIDPattern.MatchString(customID) {
-			return nil, errors.New("group_id must be 3–64 chars: letters, digits, _ or -")
+	name, err := validate.GroupName(name)
+	if err != nil {
+		return nil, err
+	}
+	id, err := validate.GroupID(customID, false)
+	if err != nil {
+		return nil, err
+	}
+	if id == "" {
+		// Retry a few times on rare auto-id collision.
+		for i := 0; i < 5; i++ {
+			cand := genGroupID()
+			var n int64
+			s.db.Model(&model.Group{}).Where("id = ?", cand).Count(&n)
+			if n == 0 {
+				id = cand
+				break
+			}
 		}
-		id = customID
+		if id == "" {
+			return nil, errors.New("failed to allocate group id")
+		}
 	} else {
-		id = genGroupID()
-	}
-	if name == "" {
-		name = id
-	}
-	if len(name) > 100 {
-		return nil, errors.New("name too long (max 100)")
-	}
-
-	var existing model.Group
-	if err := s.db.Where("id = ?", id).First(&existing).Error; err == nil {
-		return nil, errors.New("group id already exists")
+		var existing model.Group
+		if err := s.db.Where("id = ?", id).First(&existing).Error; err == nil {
+			return nil, errors.New("该群 ID 已被占用，请换一个")
+		}
 	}
 
 	g := model.Group{
@@ -97,9 +102,9 @@ func (s *GroupService) Create(ownerID uint, name, customID string) (*dto.GroupDT
 
 // Join adds durable membership; fails if group does not exist or is dissolved.
 func (s *GroupService) Join(userID uint, groupID string) (*dto.GroupDTO, error) {
-	groupID = strings.TrimSpace(groupID)
-	if groupID == "" {
-		return nil, errors.New("group_id is required")
+	groupID, err := validate.GroupID(groupID, true)
+	if err != nil {
+		return nil, err
 	}
 	var g model.Group
 	if err := s.db.Where("id = ?", groupID).First(&g).Error; err != nil {
@@ -128,7 +133,10 @@ func (s *GroupService) Join(userID uint, groupID string) (*dto.GroupDTO, error) 
 
 // Leave removes durable membership. Owner must dissolve instead.
 func (s *GroupService) Leave(userID uint, groupID string) error {
-	groupID = strings.TrimSpace(groupID)
+	groupID, err := validate.GroupID(groupID, true)
+	if err != nil {
+		return err
+	}
 	var g model.Group
 	if err := s.db.Where("id = ?", groupID).First(&g).Error; err != nil {
 		// Allow leaving hub-only ghost groups.
@@ -148,7 +156,10 @@ func (s *GroupService) Leave(userID uint, groupID string) error {
 // Dissolve deletes the group; only the owner may call this.
 // Returns member user ids (string) that were in the group for live notify.
 func (s *GroupService) Dissolve(ownerID uint, groupID string) (memberIDs []string, name string, err error) {
-	groupID = strings.TrimSpace(groupID)
+	groupID, err = validate.GroupID(groupID, true)
+	if err != nil {
+		return nil, "", err
+	}
 	var g model.Group
 	if err := s.db.Where("id = ?", groupID).First(&g).Error; err != nil {
 		return nil, "", errors.New("group not found")
@@ -174,6 +185,100 @@ func (s *GroupService) Dissolve(ownerID uint, groupID string) (memberIDs []strin
 		return nil, "", err
 	}
 	return memberIDs, name, nil
+}
+
+// Search finds groups by fuzzy id / name (ILIKE). Used for join autocomplete.
+// q empty returns recent groups (limited). Marks is_member for the caller.
+func (s *GroupService) Search(userID uint, q string, limit int) ([]dto.GroupDTO, error) {
+	q, err := validate.SearchQuery(q)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > validate.MaxLimit {
+		limit = validate.DefaultLimit
+	}
+
+	var groups []model.Group
+	tx := s.db.Model(&model.Group{})
+	if q != "" {
+		// Escape ILIKE wildcards in user input.
+		like := "%" + escapeLike(q) + "%"
+		tx = tx.Where("id ILIKE ? ESCAPE '\\' OR name ILIKE ? ESCAPE '\\'", like, like)
+	}
+	if err := tx.Order("created_at DESC").Limit(limit).Find(&groups).Error; err != nil {
+		return nil, err
+	}
+
+	// Caller's membership set.
+	memberOf := map[string]string{} // group_id → role
+	if userID > 0 && len(groups) > 0 {
+		ids := make([]string, 0, len(groups))
+		for _, g := range groups {
+			ids = append(ids, g.ID)
+		}
+		var rows []model.GroupMember
+		_ = s.db.Where("user_id = ? AND group_id IN ?", userID, ids).Find(&rows).Error
+		for _, r := range rows {
+			memberOf[r.GroupID] = r.Role
+		}
+	}
+
+	out := make([]dto.GroupDTO, 0, len(groups))
+	for i := range groups {
+		g := &groups[i]
+		role := memberOf[g.ID]
+		d := s.toDTO(g, role, s.memberCount(g.ID))
+		d.IsMember = role != ""
+		out = append(out, *d)
+	}
+
+	// Prefer not-yet-joined matches, then name/id prefix closeness.
+	if q != "" {
+		ql := strings.ToLower(q)
+		sort.SliceStable(out, func(i, j int) bool {
+			ai, aj := out[i], out[j]
+			if ai.IsMember != aj.IsMember {
+				return !ai.IsMember // non-members first for join UI
+			}
+			si := scoreGroupMatch(ql, ai.ID, ai.Name)
+			sj := scoreGroupMatch(ql, aj.ID, aj.Name)
+			if si != sj {
+				return si > sj
+			}
+			return strings.ToLower(ai.Name) < strings.ToLower(aj.Name)
+		})
+	}
+	return out, nil
+}
+
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
+// Higher = better match for autocomplete ranking.
+func scoreGroupMatch(q, id, name string) int {
+	idL := strings.ToLower(id)
+	nameL := strings.ToLower(name)
+	score := 0
+	if idL == q || nameL == q {
+		score += 100
+	}
+	if strings.HasPrefix(idL, q) {
+		score += 40
+	}
+	if strings.HasPrefix(nameL, q) {
+		score += 35
+	}
+	if strings.Contains(idL, q) {
+		score += 15
+	}
+	if strings.Contains(nameL, q) {
+		score += 10
+	}
+	return score
 }
 
 // ListMine returns groups the user belongs to.
@@ -227,6 +332,85 @@ func (s *GroupService) MemberUserIDs(groupID string) []string {
 	return out
 }
 
+// ListMembers returns the full durable roster with username, role, and online flag.
+// isOnline may be nil (all offline). Sorted: owner first, then online, then username.
+func (s *GroupService) ListMembers(groupID string, isOnline func(userID string) bool) ([]dto.GroupMemberDTO, error) {
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return nil, errors.New("group_id is required")
+	}
+	if !s.Exists(groupID) {
+		return nil, errors.New("group not found")
+	}
+
+	var rows []model.GroupMember
+	if err := s.db.Where("group_id = ?", groupID).Order("id asc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return []dto.GroupMemberDTO{}, nil
+	}
+
+	ids := make([]uint, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.UserID)
+	}
+	var users []model.User
+	_ = s.db.Where("id IN ?", ids).Find(&users).Error
+	nameByID := make(map[uint]string, len(users))
+	for _, u := range users {
+		nameByID[u.ID] = u.Username
+	}
+
+	out := make([]dto.GroupMemberDTO, 0, len(rows))
+	for _, r := range rows {
+		uid := strconv.FormatUint(uint64(r.UserID), 10)
+		name := nameByID[r.UserID]
+		if name == "" {
+			name = uid
+		}
+		role := r.Role
+		if role == "" {
+			role = model.GroupRoleMember
+		}
+		online := false
+		if isOnline != nil {
+			online = isOnline(uid)
+		} else if s.hub != nil {
+			online = s.hub.IsUserOnline(uid)
+		}
+		out = append(out, dto.GroupMemberDTO{
+			UserID:   uid,
+			Username: name,
+			Role:     role,
+			Online:   online,
+		})
+	}
+
+	// owner → admin → member; online first within band.
+	roleRank := func(role string) int {
+		switch role {
+		case model.GroupRoleOwner:
+			return 0
+		case model.GroupRoleAdmin:
+			return 1
+		default:
+			return 2
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ri, rj := out[i], out[j]
+		if roleRank(ri.Role) != roleRank(rj.Role) {
+			return roleRank(ri.Role) < roleRank(rj.Role)
+		}
+		if ri.Online != rj.Online {
+			return ri.Online
+		}
+		return strings.ToLower(ri.Username) < strings.ToLower(rj.Username)
+	})
+	return out, nil
+}
+
 // Exists reports whether a group row is present.
 func (s *GroupService) Exists(groupID string) bool {
 	var n int64
@@ -269,7 +453,138 @@ func (s *GroupService) toDTO(g *model.Group, role string, count int) *dto.GroupD
 		Role:          role,
 		MemberCount:   count,
 		CreatedAt:     g.CreatedAt.Unix(),
+		Avatar:        g.Avatar,
+		AvatarRev:     g.AvatarRev,
 	}
+}
+
+// MemberRole returns durable role for user in group (empty if not a member).
+func (s *GroupService) MemberRole(userID uint, groupID string) string {
+	var g model.Group
+	if err := s.db.Where("id = ?", groupID).First(&g).Error; err != nil {
+		return ""
+	}
+	if g.OwnerUserID == userID {
+		return model.GroupRoleOwner
+	}
+	var m model.GroupMember
+	if err := s.db.Where("group_id = ? AND user_id = ?", groupID, userID).First(&m).Error; err != nil {
+		return ""
+	}
+	if m.Role == "" {
+		return model.GroupRoleMember
+	}
+	return m.Role
+}
+
+// CanManageGroup: owner or admin may edit name / avatar.
+func (s *GroupService) CanManageGroup(userID uint, groupID string) bool {
+	r := s.MemberRole(userID, groupID)
+	return r == model.GroupRoleOwner || r == model.GroupRoleAdmin
+}
+
+// IsOwner reports whether userID is the group owner.
+func (s *GroupService) IsOwner(userID uint, groupID string) bool {
+	return s.MemberRole(userID, groupID) == model.GroupRoleOwner
+}
+
+// UpdateName renames the group (owner or admin).
+func (s *GroupService) UpdateName(actorID uint, groupID, name string) (*dto.GroupDTO, error) {
+	groupID, err := validate.GroupID(groupID, true)
+	if err != nil {
+		return nil, err
+	}
+	name, err = validate.GroupName(name)
+	if err != nil {
+		return nil, err
+	}
+	if !s.CanManageGroup(actorID, groupID) {
+		return nil, errors.New("only owner or admin can rename the group")
+	}
+	var g model.Group
+	if err := s.db.Where("id = ?", groupID).First(&g).Error; err != nil {
+		return nil, errors.New("group not found")
+	}
+	if err := s.db.Model(&g).Update("name", name).Error; err != nil {
+		return nil, err
+	}
+	g.Name = name
+	role := s.MemberRole(actorID, groupID)
+	return s.toDTO(&g, role, s.memberCount(groupID)), nil
+}
+
+// SetAvatar updates group icon (owner or admin).
+func (s *GroupService) SetAvatar(actorID uint, groupID, publicPath string) (*dto.GroupDTO, error) {
+	groupID, err := validate.GroupID(groupID, true)
+	if err != nil {
+		return nil, err
+	}
+	if !s.CanManageGroup(actorID, groupID) {
+		return nil, errors.New("only owner or admin can update the group icon")
+	}
+	var g model.Group
+	if err := s.db.Where("id = ?", groupID).First(&g).Error; err != nil {
+		return nil, errors.New("group not found")
+	}
+	rev := g.AvatarRev + 1
+	if err := s.db.Model(&g).Updates(map[string]interface{}{
+		"avatar":     publicPath,
+		"avatar_rev": rev,
+	}).Error; err != nil {
+		return nil, err
+	}
+	g.Avatar = publicPath
+	g.AvatarRev = rev
+	role := s.MemberRole(actorID, groupID)
+	return s.toDTO(&g, role, s.memberCount(groupID)), nil
+}
+
+// SetMemberRole promotes/demotes a member (owner only).
+// targetRole: admin | member. Cannot change owner; cannot set role to owner.
+func (s *GroupService) SetMemberRole(actorID uint, groupID string, targetUserID uint, targetRole string) (*dto.GroupMemberDTO, error) {
+	groupID, err := validate.GroupID(groupID, true)
+	if err != nil {
+		return nil, err
+	}
+	targetRole = strings.ToLower(strings.TrimSpace(targetRole))
+	if targetRole != model.GroupRoleAdmin && targetRole != model.GroupRoleMember {
+		return nil, errors.New("role must be admin or member")
+	}
+	if !s.IsOwner(actorID, groupID) {
+		return nil, errors.New("only the group owner can change member roles")
+	}
+	if targetUserID == actorID {
+		return nil, errors.New("cannot change your own role")
+	}
+	var g model.Group
+	if err := s.db.Where("id = ?", groupID).First(&g).Error; err != nil {
+		return nil, errors.New("group not found")
+	}
+	if g.OwnerUserID == targetUserID {
+		return nil, errors.New("cannot change the owner's role")
+	}
+	var m model.GroupMember
+	if err := s.db.Where("group_id = ? AND user_id = ?", groupID, targetUserID).First(&m).Error; err != nil {
+		return nil, errors.New("user is not a group member")
+	}
+	if err := s.db.Model(&m).Update("role", targetRole).Error; err != nil {
+		return nil, err
+	}
+	m.Role = targetRole
+	var u model.User
+	_ = s.db.First(&u, targetUserID).Error
+	name := u.Username
+	uid := strconv.FormatUint(uint64(targetUserID), 10)
+	if name == "" {
+		name = uid
+	}
+	online := s.hub != nil && s.hub.IsUserOnline(uid)
+	return &dto.GroupMemberDTO{
+		UserID:   uid,
+		Username: name,
+		Role:     targetRole,
+		Online:   online,
+	}, nil
 }
 
 // BroadcastMeetingNotice posts a system line into the group chat stream (meeting open/close).

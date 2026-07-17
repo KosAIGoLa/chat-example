@@ -8,7 +8,7 @@
 		isSystemMessage,
 		isVoiceMessage
 	} from '../utils';
-	import { mediaService } from '$lib/api';
+	import { mediaService } from '$lib/api/media.service';
 	import { cn } from '$lib/utils';
 	import { Button } from '$lib/components/ui/button';
 	import Mic from '@lucide/svelte/icons/mic';

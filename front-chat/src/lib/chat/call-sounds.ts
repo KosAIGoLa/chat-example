@@ -22,26 +22,8 @@ function getCtx(): AudioContext {
 	return ctx;
 }
 
-function stopOscillators(nodes: AudioNode[]) {
-	for (const n of nodes) {
-		try {
-			if ('stop' in n && typeof (n as OscillatorNode).stop === 'function') {
-				(n as OscillatorNode).stop();
-			}
-			n.disconnect();
-		} catch {
-			// ignore
-		}
-	}
-}
-
 /** Dual-tone burst (classic phone-ish). */
-function playBurst(
-	audio: AudioContext,
-	freqs: number[],
-	durationMs: number,
-	gain = 0.08
-): AudioNode[] {
+function playBurst(audio: AudioContext, freqs: number[], durationMs: number, gain = 0.08): void {
 	const now = audio.currentTime;
 	const g = audio.createGain();
 	g.gain.value = 0;
@@ -51,7 +33,6 @@ function playBurst(
 	g.gain.linearRampToValueAtTime(gain, now + durationMs / 1000 - 0.05);
 	g.gain.linearRampToValueAtTime(0, now + durationMs / 1000);
 
-	const nodes: AudioNode[] = [g];
 	for (const f of freqs) {
 		const o = audio.createOscillator();
 		o.type = 'sine';
@@ -59,9 +40,7 @@ function playBurst(
 		o.connect(g);
 		o.start(now);
 		o.stop(now + durationMs / 1000 + 0.02);
-		nodes.push(o);
 	}
-	return nodes;
 }
 
 function clearTimer() {

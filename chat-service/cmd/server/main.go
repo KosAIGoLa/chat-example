@@ -91,6 +91,7 @@ func main() {
 	}
 	mediaCtrl := controller.NewMediaController(mediaSvc)
 	authCtrl.SetMedia(mediaSvc)
+	groupCtrl.SetMedia(mediaSvc)
 
 	r := router.SetupRouter(chatCtrl, authCtrl, mediaCtrl, friendCtrl, groupCtrl, livekitCtrl, redPacketCtrl, authSvc)
 

@@ -8,6 +8,7 @@ import (
 
 	"ws-ex/dto"
 	"ws-ex/service"
+	"ws-ex/validate"
 )
 
 // FriendController handles friend invite / accept / list REST APIs.
@@ -67,10 +68,31 @@ func (ctrl *FriendController) ListOutgoing(c *gin.Context) {
 func (ctrl *FriendController) SendRequest(c *gin.Context) {
 	var body dto.FriendInviteRequest
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "invalid body"})
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: validate.JSONBody(err).Error()})
 		return
 	}
-	req, err := ctrl.friends.SendRequest(ctrl.me(c), body.Username, body.UserID)
+	username := ""
+	userID := ""
+	var err error
+	if body.Username != "" {
+		username, err = validate.Username(body.Username)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+			return
+		}
+	}
+	if body.UserID != "" {
+		userID, err = validate.UserIDStr(body.UserID, true)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+			return
+		}
+	}
+	if username == "" && userID == "" {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "username or user_id is required"})
+		return
+	}
+	req, err := ctrl.friends.SendRequest(ctrl.me(c), username, userID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
@@ -178,11 +200,32 @@ func (ctrl *FriendController) ListBlacklist(c *gin.Context) {
 func (ctrl *FriendController) BlockUser(c *gin.Context) {
 	var body dto.BlockUserRequest
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "invalid body"})
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: validate.JSONBody(err).Error()})
+		return
+	}
+	username := ""
+	userID := ""
+	var err error
+	if body.Username != "" {
+		username, err = validate.Username(body.Username)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+			return
+		}
+	}
+	if body.UserID != "" {
+		userID, err = validate.UserIDStr(body.UserID, true)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+			return
+		}
+	}
+	if username == "" && userID == "" {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "username or user_id is required"})
 		return
 	}
 	me := ctrl.me(c)
-	entry, err := ctrl.friends.BlockUser(me, body.Username, body.UserID)
+	entry, err := ctrl.friends.BlockUser(me, username, userID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return

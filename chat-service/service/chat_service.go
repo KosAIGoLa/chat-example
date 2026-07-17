@@ -43,6 +43,20 @@ func (s *ChatService) SetGroups(g *GroupService) {
 	s.groups = g
 }
 
+// Groups returns the durable group service (may be nil).
+func (s *ChatService) Groups() *GroupService {
+	return s.groups
+}
+
+// ListGroupMembers returns durable members with role + online (local hub).
+// Caller may enrich online with remote presence.
+func (s *ChatService) ListGroupMembers(groupID string, isOnline func(userID string) bool) ([]dto.GroupMemberDTO, error) {
+	if s.groups == nil {
+		return nil, fmt.Errorf("group service unavailable")
+	}
+	return s.groups.ListMembers(groupID, isOnline)
+}
+
 // HandleMessage processes an incoming WebSocket message from a client.
 // It determines whether it's a private or group message and routes accordingly.
 func (s *ChatService) HandleMessage(client *model.Client, raw []byte) {

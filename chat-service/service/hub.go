@@ -212,14 +212,22 @@ func (h *Hub) DeliverToUser(userID string, data []byte) bool {
 
 // GetClient returns any one live connection for userID (for APIs that only need "is online").
 func (h *Hub) GetClient(userID string) (*model.Client, bool) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	conns, ok := h.clients[userID]
 	if !ok || len(conns) == 0 {
 		return nil, false
 	}
+	// Drop closed connections that never unregistered (ghost "online").
 	for c := range conns {
+		if c == nil || c.IsClosed() {
+			delete(conns, c)
+			continue
+		}
 		return c, true
+	}
+	if len(conns) == 0 {
+		delete(h.clients, userID)
 	}
 	return nil, false
 }
@@ -402,22 +410,43 @@ func (h *Hub) GetGroupMemberInfos(groupID string, excludeUserID string) []dto.On
 	return users
 }
 
-// GetOnlineUsers returns the user IDs of all connected users on this instance.
+// GetOnlineUsers returns the user IDs of all live connected users on this instance.
 func (h *Hub) GetOnlineUsers() []string {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	users := make([]string, 0, len(h.clients))
 	for uid, conns := range h.clients {
-		if len(conns) > 0 {
-			users = append(users, uid)
+		alive := 0
+		for c := range conns {
+			if c == nil || c.IsClosed() {
+				delete(conns, c)
+				continue
+			}
+			alive++
 		}
+		if alive == 0 {
+			delete(h.clients, uid)
+			continue
+		}
+		users = append(users, uid)
 	}
 	return users
 }
 
-// GetOnlineUserInfos returns id+username for every local connected user (one entry per user).
+// IsUserOnline reports whether userID has at least one live (non-closed) connection.
+func (h *Hub) IsUserOnline(userID string) bool {
+	if h == nil || userID == "" {
+		return false
+	}
+	_, ok := h.GetClient(userID)
+	return ok
+}
+
+// GetOnlineUserInfos returns id+username for every local live connected user (one entry per user).
 // excludeUserID, when non-empty, is omitted from the list (typically the caller).
 func (h *Hub) GetOnlineUserInfos(excludeUserID string) []dto.OnlineUserDTO {
+	// Reuse GetOnlineUsers cleanup path first.
+	_ = h.GetOnlineUsers()
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	users := make([]dto.OnlineUserDTO, 0, len(h.clients))

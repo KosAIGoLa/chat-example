@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -62,33 +63,33 @@ func NewNATSService(url string, hub *Hub) (*NATSService, error) {
 	ns.js = js
 
 	// Ensure the CHAT_MESSAGES stream exists for durable message storage.
-	_, err = js.AddStream(&nats.StreamConfig{
+	// Retain several months so clients can scroll up for older history.
+	const chatHistoryRetention = 180 * 24 * time.Hour // 6 months
+	streamCfg := &nats.StreamConfig{
 		Name:      streamName,
 		Subjects:  []string{streamSubjects},
 		Storage:   nats.FileStorage,
 		Retention: nats.LimitsPolicy,
-		MaxAge:    7 * 24 * time.Hour, // retain messages for 7 days
-	})
+		MaxAge:    chatHistoryRetention,
+		MaxMsgs:   5_000_000,
+		MaxBytes:  8 * 1024 * 1024 * 1024, // 8 GiB soft cap
+	}
+	_, err = js.AddStream(streamCfg)
 	if err != nil {
-		// Stream may already exist — try updating it.
-		_, uerr := js.UpdateStream(&nats.StreamConfig{
-			Name:      streamName,
-			Subjects:  []string{streamSubjects},
-			Storage:   nats.FileStorage,
-			Retention: nats.LimitsPolicy,
-			MaxAge:    7 * 24 * time.Hour,
-		})
+		// Stream may already exist — try updating retention / limits.
+		_, uerr := js.UpdateStream(streamCfg)
 		if uerr != nil {
 			return nil, fmt.Errorf("jetstream add/update stream: %w (update: %v)", err, uerr)
 		}
 	}
 
 	// --- KV: presence management ---
-	// Short TTL so crash leftovers disappear quickly; heartbeat refreshes every 30s.
+	// Short TTL so crash leftovers disappear quickly; hub heartbeat refreshes every 30s.
+	// 45s TTL: offline without clean Unregister cannot stay "online" longer than this.
 	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{
 		Bucket:      kvBucket,
 		Description: "user presence status",
-		TTL:         90 * time.Second,
+		TTL:         45 * time.Second,
 	})
 	if err != nil {
 		// Bucket may already exist — try fetching it.
@@ -515,82 +516,140 @@ func (ns *NATSService) CallRPC(action string, payload interface{}, timeout time.
 
 // --- JetStream: message history ---
 
-// GetMessageHistory retrieves the most recent messages from JetStream for a subject.
-// Uses an ephemeral pull consumer bound to CHAT_MESSAGES and returns the last `count` msgs.
+// maxHistoryPull hard-caps how many subject-matching messages we scan per request.
+// Prevents multi-month full-stream reads from blocking the API for seconds.
+const maxHistoryPull = 2500
+
+// GetMessageHistory retrieves messages from JetStream for a subject.
+// count <= 0: up to maxHistoryPull most recent messages for the subject.
+// count > 0: only the most recent `count` (still scans subject history once, keeps a ring buffer).
 func (ns *NATSService) GetMessageHistory(subject string, count int) ([]dto.ChatMessageDTO, error) {
-	if count <= 0 {
-		count = 50
+	keep := count
+	if keep <= 0 || keep > maxHistoryPull {
+		keep = maxHistoryPull
 	}
 
-	// Ephemeral pull consumer — "" durable name means temporary.
+	// Ephemeral pull consumer bound to CHAT_MESSAGES (filtered by subject).
+	// Skip per-message Ack to avoid ACK RTT on large history scans.
 	sub, err := ns.js.PullSubscribe(subject, "", nats.BindStream(streamName))
 	if err != nil {
 		return nil, fmt.Errorf("pull subscribe: %w", err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	var all []dto.ChatMessageDTO
-	for {
-		msgs, err := sub.Fetch(100, nats.MaxWait(500*time.Millisecond))
+	// Ring buffer of last `keep` messages (stream order is chronological).
+	buf := make([]dto.ChatMessageDTO, 0, keep)
+	scanned := 0
+	idleRounds := 0
+	for scanned < maxHistoryPull {
+		batch := 500
+		if maxHistoryPull-scanned < batch {
+			batch = maxHistoryPull - scanned
+		}
+		// First batches wait longer; after data starts, fail fast on empty.
+		wait := 400 * time.Millisecond
+		if scanned > 0 {
+			wait = 120 * time.Millisecond
+		}
+		msgs, err := sub.Fetch(batch, nats.MaxWait(wait))
 		if err != nil {
-			// Timeout means no more messages for this subject (including empty).
 			if errors.Is(err, nats.ErrTimeout) {
-				break
+				idleRounds++
+				if scanned == 0 || idleRounds >= 2 {
+					break
+				}
+				continue
 			}
 			return nil, fmt.Errorf("fetch history: %w", err)
 		}
 		if len(msgs) == 0 {
-			break
+			idleRounds++
+			if idleRounds >= 2 {
+				break
+			}
+			continue
 		}
+		idleRounds = 0
 		for _, m := range msgs {
+			scanned++
 			var msg dto.ChatMessageDTO
 			if err := json.Unmarshal(m.Data, &msg); err == nil {
-				all = append(all, msg)
+				if len(buf) < keep {
+					buf = append(buf, msg)
+				} else {
+					// Drop oldest, append newest — O(keep) mem, keeps tail.
+					copy(buf[0:], buf[1:])
+					buf[keep-1] = msg
+				}
 			}
-			_ = m.Ack()
+			// AckNone consumer: Ack is a no-op / optional.
+		}
+		if scanned >= maxHistoryPull {
+			break
 		}
 	}
 
-	// Return the most recent `count` messages (stream order is chronological).
-	if len(all) > count {
-		all = all[len(all)-count:]
+	if count > 0 && len(buf) > count {
+		return buf[len(buf)-count:], nil
 	}
-	return all, nil
+	return buf, nil
 }
 
 // GetPrivateHistory returns the conversation between two users.
 // Private messages are stored on chat.private.<recipient>, so we load both
 // directions and keep only messages exchanged between a and b.
+// count <= 0 uses a capped window (maxHistoryPull per inbox).
 func (ns *NATSService) GetPrivateHistory(userA, userB string, count int) ([]dto.ChatMessageDTO, error) {
+	// Per-inbox scan budget: enough to find the conversation pair without full 6-month dump.
+	perSide := count * 8
+	if perSide < 200 {
+		perSide = 200
+	}
+	if perSide > maxHistoryPull {
+		perSide = maxHistoryPull
+	}
 	if count <= 0 {
-		count = 50
+		perSide = maxHistoryPull
 	}
 
-	toB, err := ns.GetMessageHistory(fmt.Sprintf("chat.private.%s", userB), count*2)
-	if err != nil {
-		return nil, err
+	type sideResult struct {
+		msgs []dto.ChatMessageDTO
+		err  error
 	}
-	toA, err := ns.GetMessageHistory(fmt.Sprintf("chat.private.%s", userA), count*2)
-	if err != nil {
-		return nil, err
+	chB := make(chan sideResult, 1)
+	chA := make(chan sideResult, 1)
+	go func() {
+		m, e := ns.GetMessageHistory(fmt.Sprintf("chat.private.%s", userB), perSide)
+		chB <- sideResult{m, e}
+	}()
+	go func() {
+		m, e := ns.GetMessageHistory(fmt.Sprintf("chat.private.%s", userA), perSide)
+		chA <- sideResult{m, e}
+	}()
+	rb := <-chB
+	ra := <-chA
+	if rb.err != nil {
+		return nil, rb.err
+	}
+	if ra.err != nil {
+		return nil, ra.err
 	}
 
 	var merged []dto.ChatMessageDTO
-	for _, m := range toB {
+	for _, m := range rb.msgs {
 		if m.Type == "private" && m.From == userA && m.To == userB {
 			merged = append(merged, m)
 		}
 	}
-	for _, m := range toA {
+	for _, m := range ra.msgs {
 		if m.Type == "private" && m.From == userB && m.To == userA {
 			merged = append(merged, m)
 		}
 	}
 
-	// Sort by timestamp ascending; stable by content if timestamps tie/missing.
 	sortChatMessages(merged)
 
-	if len(merged) > count {
+	if count > 0 && len(merged) > count {
 		merged = merged[len(merged)-count:]
 	}
 	return merged, nil
@@ -602,13 +661,12 @@ func sortChatMessages(msgs []dto.ChatMessageDTO) {
 
 // SortChatMessages orders by seq (prefer), then timestamp, then id.
 func SortChatMessages(msgs []dto.ChatMessageDTO) {
-	for i := 1; i < len(msgs); i++ {
-		j := i
-		for j > 0 && chatMsgLess(msgs[j], msgs[j-1]) {
-			msgs[j-1], msgs[j] = msgs[j], msgs[j-1]
-			j--
-		}
+	if len(msgs) < 2 {
+		return
 	}
+	sort.SliceStable(msgs, func(i, j int) bool {
+		return chatMsgLess(msgs[i], msgs[j])
+	})
 }
 
 // chatMsgLess reports whether a should appear before b (ascending order).
@@ -648,6 +706,20 @@ func MaxSeq(msgs []dto.ChatMessageDTO) int64 {
 	return max
 }
 
+// MinSeq returns the lowest positive seq in the slice (0 if none).
+func MinSeq(msgs []dto.ChatMessageDTO) int64 {
+	var min int64
+	for _, m := range msgs {
+		if m.Seq <= 0 {
+			continue
+		}
+		if min == 0 || m.Seq < min {
+			min = m.Seq
+		}
+	}
+	return min
+}
+
 // FilterSinceSeq keeps messages with Seq > since (messages with seq=0 kept only when since=0).
 func FilterSinceSeq(msgs []dto.ChatMessageDTO, since int64) []dto.ChatMessageDTO {
 	if since <= 0 {
@@ -656,6 +728,28 @@ func FilterSinceSeq(msgs []dto.ChatMessageDTO, since int64) []dto.ChatMessageDTO
 	out := make([]dto.ChatMessageDTO, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Seq > since {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// FilterBeforeSeq keeps messages strictly older than before (by seq when present).
+// Messages without seq fall back to timestamp < beforeTS when beforeTS > 0.
+func FilterBeforeSeq(msgs []dto.ChatMessageDTO, beforeSeq, beforeTS int64) []dto.ChatMessageDTO {
+	if beforeSeq <= 0 && beforeTS <= 0 {
+		return msgs
+	}
+	out := make([]dto.ChatMessageDTO, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Seq > 0 && beforeSeq > 0 {
+			if m.Seq < beforeSeq {
+				out = append(out, m)
+			}
+			continue
+		}
+		// Legacy / missing seq: use timestamp cursor.
+		if beforeTS > 0 && m.Timestamp > 0 && m.Timestamp < beforeTS {
 			out = append(out, m)
 		}
 	}

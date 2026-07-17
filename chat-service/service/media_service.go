@@ -308,6 +308,139 @@ func (m *MediaService) ResolveAvatarPath(userID string) (absPath string, content
 	return "", "", fmt.Errorf("not found")
 }
 
+// groupAvatarDir returns MEDIA_DIR/group-avatars.
+func (m *MediaService) groupAvatarDir() (string, error) {
+	dir := filepath.Join(m.dir, "group-avatars")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// safeGroupFileKey sanitizes group id for filesystem use.
+func safeGroupFileKey(groupID string) string {
+	groupID = strings.TrimSpace(groupID)
+	var b strings.Builder
+	for _, r := range groupID {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	s := b.String()
+	if s == "" {
+		return "unknown"
+	}
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return s
+}
+
+// SaveGroupAvatar stores group icon as group-avatars/{safeID}{ext}.
+// Returns public path "/api/group-avatar/{groupID}".
+func (m *MediaService) SaveGroupAvatar(groupID string, r io.Reader, contentType string) (publicPath string, mimeType string, written int64, err error) {
+	key := safeGroupFileKey(groupID)
+	if key == "unknown" {
+		return "", "", 0, fmt.Errorf("invalid group id")
+	}
+	mimeType = normalizeMIME(contentType)
+	ext, ok := allowedAvatarMIME[mimeType]
+	if !ok {
+		switch {
+		case strings.Contains(mimeType, "jpeg") || strings.Contains(mimeType, "jpg"):
+			ext, mimeType, ok = ".jpg", "image/jpeg", true
+		case strings.Contains(mimeType, "png"):
+			ext, mimeType, ok = ".png", "image/png", true
+		case strings.Contains(mimeType, "webp"):
+			ext, mimeType, ok = ".webp", "image/webp", true
+		case strings.Contains(mimeType, "gif"):
+			ext, mimeType, ok = ".gif", "image/gif", true
+		}
+	}
+	if !ok || ext == "" {
+		return "", "", 0, fmt.Errorf("unsupported image type %q (use jpeg/png/webp/gif)", contentType)
+	}
+
+	dir, err := m.groupAvatarDir()
+	if err != nil {
+		return "", "", 0, err
+	}
+	// Remove previous files for this group.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, key+".") || name == key {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
+
+	filename := key + ext
+	path := filepath.Join(dir, filename)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("create group avatar: %w", err)
+	}
+	defer f.Close()
+
+	limited := io.LimitReader(r, MaxAvatarBytes+1)
+	written, err = io.Copy(f, limited)
+	if err != nil {
+		_ = os.Remove(path)
+		return "", "", 0, fmt.Errorf("write group avatar: %w", err)
+	}
+	if written == 0 {
+		_ = os.Remove(path)
+		return "", "", 0, fmt.Errorf("empty file")
+	}
+	if written > MaxAvatarBytes {
+		_ = os.Remove(path)
+		return "", "", 0, fmt.Errorf("file too large (max %d bytes)", MaxAvatarBytes)
+	}
+	if rf, err := os.Open(path); err == nil {
+		cfg, _, decErr := image.DecodeConfig(rf)
+		_ = rf.Close()
+		if decErr == nil {
+			if cfg.Width < MinAvatarPixels || cfg.Height < MinAvatarPixels {
+				_ = os.Remove(path)
+				return "", "", 0, fmt.Errorf("image too small (min %dx%d)", MinAvatarPixels, MinAvatarPixels)
+			}
+		}
+	}
+
+	publicPath = "/api/group-avatar/" + groupID
+	return publicPath, mimeType, written, nil
+}
+
+// ResolveGroupAvatarPath finds group-avatars/{safeID}.* on disk.
+func (m *MediaService) ResolveGroupAvatarPath(groupID string) (absPath string, contentType string, err error) {
+	key := safeGroupFileKey(groupID)
+	if key == "unknown" || strings.Contains(groupID, "..") {
+		return "", "", fmt.Errorf("invalid group id")
+	}
+	dir, err := m.groupAvatarDir()
+	if err != nil {
+		return "", "", err
+	}
+	for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp", ".gif"} {
+		p := filepath.Join(dir, key+ext)
+		if st, e := os.Stat(p); e == nil && !st.IsDir() {
+			ct := "image/jpeg"
+			switch ext {
+			case ".png":
+				ct = "image/png"
+			case ".webp":
+				ct = "image/webp"
+			case ".gif":
+				ct = "image/gif"
+			}
+			return p, ct, nil
+		}
+	}
+	return "", "", fmt.Errorf("not found")
+}
+
 // ContentTypeForFilename guesses Content-Type from extension.
 func ContentTypeForFilename(filename string) string {
 	ext := strings.ToLower(filepath.Ext(filename))

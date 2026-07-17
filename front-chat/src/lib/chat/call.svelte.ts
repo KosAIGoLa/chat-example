@@ -34,7 +34,7 @@ import {
 	type CallType,
 	type LiveKitTokenResponse,
 	type MeetingStatus
-} from '$lib/api';
+} from '$lib/api/livekit.service';
 import type { CallEvent, CallMedia, MeetingEvent } from './types';
 import {
 	playConnectTone,
@@ -81,6 +81,8 @@ export function createCallController(opts: {
 
 	let room: Room | null = null;
 	let localVideoEl: HTMLVideoElement | null = null;
+	/** Non-reactive DOM lookup (not $state); plain Map is intentional. */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity -- external LiveKit video elements, not reactive UI state
 	const remoteVideos = new Map<string, HTMLVideoElement>();
 
 	/** Bumps on each connect attempt; stale connects abort. */

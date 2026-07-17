@@ -12,6 +12,7 @@ import (
 
 	"ws-ex/dto"
 	"ws-ex/service"
+	"ws-ex/validate"
 )
 
 // LiveKitController issues tokens and helps signal calls / meetings over the chat hub.
@@ -60,21 +61,22 @@ func (ctrl *LiveKitController) CreateToken(c *gin.Context) {
 
 	var body dto.LiveKitTokenRequest
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "invalid body"})
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: validate.JSONBody(err).Error()})
 		return
 	}
 	uid, uidStr, username := ctrl.me(c)
-	callType := strings.ToLower(strings.TrimSpace(body.Type))
-	if callType == "" {
-		callType = "private"
+	callType, err := validate.CallType(body.Type)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
 	}
 
 	var room, peerID, groupID string
 	switch callType {
 	case "private":
-		peerID = strings.TrimSpace(body.PeerID)
-		if peerID == "" {
-			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "peer_id is required for private call"})
+		peerID, err = validate.PeerID(body.PeerID, true)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 			return
 		}
 		if peerID == uidStr {
@@ -91,29 +93,33 @@ func (ctrl *LiveKitController) CreateToken(c *gin.Context) {
 				return
 			}
 		}
-		room = strings.TrimSpace(body.Room)
+		room, err = validate.Room(body.Room, false)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+			return
+		}
 		if room == "" {
 			room = service.PrivateRoomName(uidStr, peerID)
 		}
 
 	case "group":
-		groupID = strings.TrimSpace(body.GroupID)
-		if groupID == "" {
-			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "group_id is required for group meeting"})
+		groupID, err = validate.GroupID(body.GroupID, true)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 			return
 		}
 		if ctrl.groups != nil && !ctrl.groups.IsMember(uid, groupID) {
 			c.JSON(http.StatusForbidden, dto.APIResponseDTO{Code: 403, Message: "not a group member"})
 			return
 		}
-		room = strings.TrimSpace(body.Room)
+		room, err = validate.Room(body.Room, false)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+			return
+		}
 		if room == "" {
 			room = service.GroupRoomName(groupID)
 		}
-
-	default:
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "type must be private or group"})
-		return
 	}
 
 	token, err := ctrl.lk.MintToken(uidStr, username, room, true, true)
@@ -147,7 +153,7 @@ func (ctrl *LiveKitController) CreateToken(c *gin.Context) {
 func (ctrl *LiveKitController) SignalCall(c *gin.Context) {
 	var body dto.CallEvent
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "invalid body"})
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: validate.JSONBody(err).Error()})
 		return
 	}
 	_, uidStr, username := ctrl.me(c)
@@ -159,15 +165,49 @@ func (ctrl *LiveKitController) SignalCall(c *gin.Context) {
 	if body.Timestamp == 0 {
 		body.Timestamp = time.Now().Unix()
 	}
-	action := strings.ToLower(strings.TrimSpace(body.Action))
-	if action == "" {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "action is required"})
+	action, err := validate.CallAction(body.Action)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
 	}
 	body.Action = action
-	if body.Room == "" {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "room is required"})
+	room, err := validate.Room(body.Room, true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
+	}
+	body.Room = room
+	if body.Media != "" {
+		media, err := validate.Media(body.Media)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+			return
+		}
+		body.Media = media
+	}
+	if body.CallType != "" {
+		ct, err := validate.CallType(body.CallType)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+			return
+		}
+		body.CallType = ct
+	}
+	if body.GroupID != "" {
+		gid, err := validate.GroupID(body.GroupID, true)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+			return
+		}
+		body.GroupID = gid
+	}
+	if body.To != "" {
+		to, err := validate.PeerID(body.To, true)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+			return
+		}
+		body.To = to
 	}
 
 	data, err := json.Marshal(body)
@@ -229,13 +269,13 @@ func (ctrl *LiveKitController) MeetingAction(c *gin.Context) {
 
 	var body dto.MeetingActionRequest
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "invalid body"})
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: validate.JSONBody(err).Error()})
 		return
 	}
 	uid, uidStr, username := ctrl.me(c)
-	groupID := strings.TrimSpace(body.GroupID)
-	if groupID == "" {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "group_id is required"})
+	groupID, err := validate.GroupID(body.GroupID, true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
 	}
 	if ctrl.groups != nil && !ctrl.groups.IsMember(uid, groupID) {
@@ -243,29 +283,34 @@ func (ctrl *LiveKitController) MeetingAction(c *gin.Context) {
 		return
 	}
 
-	action := strings.ToLower(strings.TrimSpace(body.Action))
+	action, err := validate.MeetingAction(body.Action)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
 	switch action {
 	case "start":
-		ctrl.meetingStart(c, groupID, uidStr, username, body.Media)
+		media, mErr := validate.Media(body.Media)
+		if mErr != nil {
+			c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: mErr.Error()})
+			return
+		}
+		ctrl.meetingStart(c, groupID, uidStr, username, media)
 	case "join":
 		ctrl.meetingJoin(c, groupID, uidStr, username)
 	case "leave":
 		ctrl.meetingLeave(c, groupID, uidStr, username)
 	case "end":
 		ctrl.meetingEnd(c, groupID, uidStr, username)
-	default:
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{
-			Code: 400, Message: "action must be start, join, leave, or end",
-		})
 	}
 }
 
 // GetMeeting GET /api/livekit/meeting/:group_id
 func (ctrl *LiveKitController) GetMeeting(c *gin.Context) {
 	uid, _, _ := ctrl.me(c)
-	groupID := strings.TrimSpace(c.Param("group_id"))
-	if groupID == "" {
-		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "group_id required"})
+	groupID, err := validate.GroupID(c.Param("group_id"), true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
 		return
 	}
 	if ctrl.groups != nil && !ctrl.groups.IsMember(uid, groupID) {

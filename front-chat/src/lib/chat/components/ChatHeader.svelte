@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { ConnectionStatus } from '../types';
-	import { authService } from '$lib/api';
+	import { authService } from '$lib/api/auth.service';
 	import { auth } from '$lib/auth.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';

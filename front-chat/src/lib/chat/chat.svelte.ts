@@ -3,11 +3,11 @@ import {
 	chatService,
 	friendService,
 	groupService,
-	livekitService,
-	mediaService,
-	redPacketService,
-	type CreateRedPacketBody
+	mediaService
 } from '$lib/api';
+import { livekitService } from '$lib/api/livekit.service';
+import { redPacketService } from '$lib/api/red-packet.service';
+import type { CreateRedPacketBody } from '$lib/api/red-packet.service';
 import {
 	encryptContent,
 	hasMessageKey,
@@ -29,6 +29,7 @@ import type {
 	FriendUser,
 	GroupDissolvedEvent,
 	GroupInfo,
+	GroupMember,
 	GroupMembersEvent,
 	MeetingEvent,
 	OnlineUser,
@@ -50,14 +51,23 @@ import {
 	typingUI
 } from './typing-ui.svelte';
 import {
+	clearAllConvCaches,
+	clearConvCache,
 	convKeyGroup,
 	convKeyPrivate,
 	loadConvCache,
 	maxSeqOf,
 	mergeById,
+	minSeqOf,
+	minTimestampOf,
 	saveConvCache,
 	sortMessagesBySeq
 } from './message-cache';
+
+/** Append unique string ids without mutating via Set (eslint/svelte reactivity). */
+function appendUnique(list: string[], id: string): string[] {
+	return list.includes(id) ? list : [...list, id];
+}
 
 const JOINED_GROUPS_KEY = 'joined_groups';
 
@@ -175,8 +185,8 @@ export function createChatController(opts: {
 	let incomingRequests = $state<FriendRequest[]>([]);
 	/** Users I blocked. */
 	let blacklist = $state<BlacklistUser[]>([]);
-	/** Members of the currently selected group (never includes self). */
-	let groupMembers = $state<OnlineUser[]>([]);
+	/** Full durable roster of the selected group (role + online; includes self). */
+	let groupMembers = $state<GroupMember[]>([]);
 	/** user_id → username cache for titles / labels. */
 	let userLabels = $state<Record<string, string>>({});
 	/** user_ids with unread private messages (blink in list). */
@@ -198,6 +208,10 @@ export function createChatController(opts: {
 	let typingHint = $state('');
 	let connectionStatus = $state<ConnectionStatus>('disconnected');
 	let historyLoading = $state(false);
+	/** True while fetching an older page (scroll-up). */
+	let historyLoadingOlder = $state(false);
+	/** Server has more older messages than currently loaded. */
+	let historyHasMore = $state(true);
 	/** How many reconnect attempts since last successful open. */
 	let reconnectAttempt = $state(0);
 
@@ -584,21 +598,48 @@ export function createChatController(opts: {
 		});
 	}
 
-	/** Ensure peer appears in private online list (e.g. DM from someone not yet listed). */
+	/**
+	 * Remember peer labels only — never treat "sent me a message" as online.
+	 * Online status comes solely from presence events / REST online list.
+	 */
 	function ensurePeerListed(peerId: string, username?: string) {
 		if (!peerId || peerId === myUserId) return;
 		const name = username?.trim() || userLabels[peerId] || peerId;
 		rememberUsers([{ user_id: peerId, username: name }]);
-		if (!onlineUsers.some((u) => u.user_id === peerId)) {
-			onlineUsers = [...onlineUsers, { user_id: peerId, username: name }];
-		}
 	}
 
 	function applyPresence(event: PresenceEvent) {
 		const uid = String(event.user_id ?? '');
-		if (!uid || uid === myUserId) return; // never list yourself
-		if (event.online) {
-			const name = (event.username && event.username.trim()) || uid;
+		if (!uid) return;
+		const isOnline = event.online === true;
+		const name =
+			(event.username && event.username.trim()) || userLabels[uid] || uid;
+
+		// Friends list green-dot (source of truth for private chat UI).
+		if (friends.some((f) => f.user_id === uid)) {
+			friends = friends.map((f) =>
+				f.user_id === uid
+					? { ...f, online: isOnline, username: name || f.username }
+					: f
+			);
+		}
+
+		// Group roster: keep offline members, only flip the flag.
+		if (groupMembers.some((m) => m.user_id === uid)) {
+			groupMembers = groupMembers.map((m) =>
+				m.user_id === uid
+					? {
+							...m,
+							online: isOnline,
+							username: name || m.username || uid
+						}
+					: m
+			);
+		}
+
+		if (uid === myUserId) return; // global online list never includes self
+
+		if (isOnline) {
 			rememberUsers([{ user_id: uid, username: name }]);
 			const idx = onlineUsers.findIndex((u) => u.user_id === uid);
 			if (idx >= 0) {
@@ -609,19 +650,47 @@ export function createChatController(opts: {
 				onlineUsers = [...onlineUsers, { user_id: uid, username: name }];
 			}
 		} else {
-			// Always remove on offline — source of truth from server event.
+			// Offline: remove from strangers/online list; do not re-add via message traffic.
 			onlineUsers = onlineUsers.filter((u) => u.user_id !== uid);
-			// Also drop from current group member list if present.
-			groupMembers = groupMembers.filter((u) => u.user_id !== uid);
 		}
 	}
 
 	function applyGroupMembers(event: GroupMembersEvent) {
 		const gid = String(event.group_id ?? '');
 		if (!gid || gid !== groupId) return;
-		const members = normalizeOnlineList(event.members);
-		groupMembers = members;
-		rememberUsers(members);
+		// Room presence push is partial — re-fetch full durable roster (role + online).
+		void refreshGroupMembers(gid);
+	}
+
+	function normalizeGroupMembers(raw: unknown): GroupMember[] {
+		if (!Array.isArray(raw)) return [];
+		const out: GroupMember[] = [];
+		for (const item of raw) {
+			if (!item || typeof item !== 'object') continue;
+			const o = item as Record<string, unknown>;
+			const uid = String(o.user_id ?? o.id ?? '');
+			if (!uid) continue;
+			const name = String(o.username ?? o.name ?? uid);
+			const roleRaw = String(o.role ?? 'member').toLowerCase();
+			const role =
+				roleRaw === 'owner' ? 'owner' : roleRaw === 'admin' ? 'admin' : 'member';
+			const online = o.online === true || o.online === 1 || o.online === 'true';
+			out.push({
+				user_id: uid,
+				username: name || uid,
+				role,
+				online
+			});
+		}
+		// owner > admin > member, then online, then name
+		const rank = (r: string) => (r === 'owner' ? 0 : r === 'admin' ? 1 : 2);
+		out.sort((a, b) => {
+			const rd = rank(a.role) - rank(b.role);
+			if (rd !== 0) return rd;
+			if (a.online !== b.online) return a.online ? -1 : 1;
+			return (a.username || '').localeCompare(b.username || '', 'zh');
+		});
+		return out;
 	}
 
 	async function handleIncomingChat(msg: ChatMessage) {
@@ -1095,8 +1164,9 @@ export function createChatController(opts: {
 					// Real-time online/offline push from server.
 					if ('type' in raw && raw.type === 'presence' && 'user_id' in raw) {
 						applyPresence(raw as PresenceEvent);
-						// Refresh friend online flags when presence changes.
+						// Light reconcile with server (async); applyPresence already flipped local flags.
 						void refreshFriends();
+						void refreshOnlineUsers();
 						return;
 					}
 					// Group dissolved by owner.
@@ -1246,10 +1316,18 @@ export function createChatController(opts: {
 		return '';
 	}
 
+	let persistCacheTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Debounced localStorage write — sync JSON.stringify of large histories was janking send/input. */
 	function persistActiveCache(list: ChatMessage[] = messages) {
 		const key = activeCacheKey();
 		if (!key) return;
-		saveConvCache(key, list, maxSeqOf(list));
+		const snapshot = list;
+		const maxSeq = maxSeqOf(list);
+		if (persistCacheTimer != null) clearTimeout(persistCacheTimer);
+		persistCacheTimer = setTimeout(() => {
+			persistCacheTimer = null;
+			saveConvCache(key, snapshot, maxSeq);
+		}, 250);
 	}
 
 	function appendMessage(msg: ChatMessage) {
@@ -1291,14 +1369,6 @@ export function createChatController(opts: {
 		messages = sortMessagesBySeq([...messages, msg]);
 		updatePreview(msg);
 		persistActiveCache(messages);
-	}
-
-	function mergeMessages(incoming: ChatMessage[]) {
-		if (!incoming.length) return;
-		const merged = mergeById(messages, incoming);
-		messages = merged;
-		for (const m of incoming) updatePreview(m);
-		persistActiveCache(merged);
 	}
 
 	function applyRecall(id: string) {
@@ -1406,111 +1476,210 @@ export function createChatController(opts: {
 		}
 	}
 
+	const HISTORY_PAGE = 50;
+
 	/**
-	 * Load conversation history:
-	 *  1) Hydrate from local cache immediately (ordered by seq)
-	 *  2) Fetch only messages with seq > max_seq (or full window if no cache)
-	 *  3) Merge, sort, write cache
+	 * Shared hydrate + fetch for private/group history.
+	 * Cache paints immediately so UI is not blocked on network/decrypt.
 	 */
-	async function loadPrivateHistory(peerId: string, force = false) {
-		const key = convKeyPrivate(peerId);
+	async function loadConversationHistory(opts: {
+		key: string;
+		force: boolean;
+		fetch: (
+			page: number,
+			sinceSeq: number
+		) => Promise<{ messages?: ChatMessage[]; max_seq?: number; has_more?: boolean }>;
+	}) {
+		const { key, force, fetch } = opts;
+		if (!key || key.endsWith(':')) return;
 		if (!force && loadedKey === key) return;
+
 		const epoch = ++historyEpoch;
 		const switching = loadedKey !== key;
 		loadedKey = key;
-		historyLoading = true;
+		if (switching) {
+			historyHasMore = true;
+		}
 
-		// 1) Cache first paint
+		// 1) Cache-first paint (sync) — user sees history instantly.
 		const cached = loadConvCache(key);
-		let base: ChatMessage[] = [];
+		let base: ChatMessage[];
+		let paintedFromCache = false;
 		if (cached?.messages?.length) {
-			base = sortMessagesBySeq([...cached.messages]);
+			const cachedMsgs = sortMessagesBySeq([...cached.messages]);
 			if (switching || messages.length === 0) {
+				base = cachedMsgs;
 				messages = base;
-				for (const m of base) updatePreview(m);
+				// Only update previews once for the last few (avoid O(n) UI thrash).
+				const tail = base.slice(-30);
+				for (const m of tail) updatePreview(m);
+				paintedFromCache = true;
 			} else {
-				base = mergeById(messages, base);
+				base = mergeById(messages, cachedMsgs);
 				messages = base;
+				paintedFromCache = true;
 			}
 		} else if (switching) {
 			messages = [];
+			base = [];
 		} else {
 			base = [...messages];
 		}
 
+		// Show spinner only when we have nothing to show yet.
+		historyLoading = !paintedFromCache;
+
 		try {
-			await ensureCryptoKey().catch(() => undefined);
+			// Crypto key in parallel path; skip await chain if already loaded.
+			if (!hasMessageKey()) {
+				await ensureCryptoKey().catch(() => undefined);
+			}
 			const sinceSeq = maxSeqOf(base);
-			// Full window when no seq yet; otherwise delta only after last seq.
-			const res = await chatService.getPrivateHistory(peerId, sinceSeq > 0 ? 100 : 100, {
-				sinceSeq: sinceSeq > 0 ? sinceSeq : undefined
-			});
+			const res = await fetch(HISTORY_PAGE, sinceSeq);
 			if (epoch !== historyEpoch) return;
-			const list = await decryptMessages((res.messages ?? []).filter(isChatContent));
-			if (list.length || sinceSeq === 0) {
+
+			const rawList = (res.messages ?? []).filter(isChatContent);
+			// Decrypt only what is still ciphertext (cache is already plain).
+			const list = await decryptMessages(rawList);
+			if (epoch !== historyEpoch) return;
+
+			if (list.length > 0) {
 				const merged = mergeById(base, list);
 				messages = merged;
 				for (const m of list) updatePreview(m);
 				const maxSeq = Math.max(sinceSeq, res.max_seq ?? 0, maxSeqOf(merged));
-				saveConvCache(key, merged, maxSeq);
+				// Defer localStorage write so send/UI stay snappy.
+				queueMicrotask(() => saveConvCache(key, merged, maxSeq));
+			} else if (sinceSeq === 0) {
+				messages = base;
+				queueMicrotask(() => saveConvCache(key, base, 0));
 			} else {
-				// Empty delta — still refresh cache max_seq
-				saveConvCache(key, base, Math.max(sinceSeq, res.max_seq ?? 0));
+				queueMicrotask(() =>
+					saveConvCache(key, base, Math.max(sinceSeq, res.max_seq ?? 0))
+				);
 			}
-		} catch {
+
+			if (sinceSeq === 0) {
+				if (typeof res.has_more === 'boolean') {
+					historyHasMore = res.has_more;
+				} else {
+					historyHasMore = list.length >= HISTORY_PAGE;
+				}
+			}
+		} catch (e) {
+			console.warn('[history] load failed', key, e);
 			if (epoch === historyEpoch && !base.length) messages = [];
 		} finally {
 			if (epoch === historyEpoch) historyLoading = false;
 		}
 	}
 
-	async function loadGroupHistory(g: string, force = false) {
-		const key = convKeyGroup(g);
-		if (!force && loadedKey === key) return;
-		const epoch = ++historyEpoch;
-		const switching = loadedKey !== key;
-		loadedKey = key;
-		historyLoading = true;
+	async function loadPrivateHistory(peerId: string, force = false) {
+		const peer = (peerId || '').trim();
+		if (!peer) return;
+		await loadConversationHistory({
+			key: convKeyPrivate(peer),
+			force,
+			fetch: (page, sinceSeq) =>
+				chatService.getPrivateHistory(peer, page, {
+					sinceSeq: sinceSeq > 0 ? sinceSeq : undefined
+				})
+		});
+	}
 
-		const cached = loadConvCache(key);
-		let base: ChatMessage[] = [];
-		if (cached?.messages?.length) {
-			base = sortMessagesBySeq([...cached.messages]);
-			if (switching || messages.length === 0) {
-				messages = base;
-				for (const m of base) updatePreview(m);
-			} else {
-				base = mergeById(messages, base);
-				messages = base;
-			}
-		} else if (switching) {
-			messages = [];
-		} else {
-			base = [...messages];
+	async function loadGroupHistory(g: string, force = false) {
+		const gid = (g || '').trim();
+		if (!gid) return;
+		await loadConversationHistory({
+			key: convKeyGroup(gid),
+			force,
+			fetch: (page, sinceSeq) =>
+				chatService.getGroupHistory(gid, page, {
+					sinceSeq: sinceSeq > 0 ? sinceSeq : undefined
+				})
+		});
+	}
+
+	/**
+	 * Scroll-up: load older messages before the earliest currently shown.
+	 * Returns number of newly prepended messages (0 if none / exhausted).
+	 */
+	async function loadOlderHistory(): Promise<number> {
+		if (historyLoadingOlder || historyLoading || !historyHasMore) return 0;
+		const mode = chatMode;
+		const peer = targetUser.trim();
+		const gid = groupId.trim();
+		if (mode === 'private' && !peer) return 0;
+		if (mode === 'group' && !gid) return 0;
+
+		const beforeSeq = minSeqOf(messages);
+		const beforeTs = minTimestampOf(messages);
+		if (beforeSeq <= 0 && beforeTs <= 0) {
+			historyHasMore = false;
+			return 0;
 		}
 
+		historyLoadingOlder = true;
+		const epoch = historyEpoch;
 		try {
 			await ensureCryptoKey().catch(() => undefined);
-			const sinceSeq = maxSeqOf(base);
-			const res = await chatService.getGroupHistory(g, 100, {
-				sinceSeq: sinceSeq > 0 ? sinceSeq : undefined
-			});
-			if (epoch !== historyEpoch) return;
+			const res =
+				mode === 'private'
+					? await chatService.getPrivateHistory(peer, HISTORY_PAGE, {
+							beforeSeq: beforeSeq > 0 ? beforeSeq : undefined,
+							beforeTs: beforeTs > 0 ? beforeTs : undefined
+						})
+					: await chatService.getGroupHistory(gid, HISTORY_PAGE, {
+							beforeSeq: beforeSeq > 0 ? beforeSeq : undefined,
+							beforeTs: beforeTs > 0 ? beforeTs : undefined
+						});
+			if (epoch !== historyEpoch) return 0;
 			const list = await decryptMessages((res.messages ?? []).filter(isChatContent));
-			if (list.length || sinceSeq === 0) {
-				const merged = mergeById(base, list);
-				messages = merged;
-				for (const m of list) updatePreview(m);
-				const maxSeq = Math.max(sinceSeq, res.max_seq ?? 0, maxSeqOf(merged));
-				saveConvCache(key, merged, maxSeq);
-			} else {
-				saveConvCache(key, base, Math.max(sinceSeq, res.max_seq ?? 0));
+			if (!list.length) {
+				historyHasMore = false;
+				return 0;
 			}
-		} catch {
-			if (epoch === historyEpoch && !base.length) messages = [];
+			const prevLen = messages.length;
+			const merged = mergeById(messages, list);
+			messages = merged;
+			const added = merged.length - prevLen;
+			historyHasMore = res.has_more === true;
+			if (added === 0) historyHasMore = false;
+
+			const key = mode === 'private' ? convKeyPrivate(peer) : convKeyGroup(gid);
+			saveConvCache(key, merged, maxSeqOf(merged));
+			return Math.max(0, added);
+		} catch (e) {
+			console.warn('[history] load older failed', e);
+			return 0;
 		} finally {
-			if (epoch === historyEpoch) historyLoading = false;
+			if (epoch === historyEpoch) historyLoadingOlder = false;
 		}
+	}
+
+	/**
+	 * Clear frontend history for the active conversation (localStorage + UI).
+	 * Server history is untouched; reopening the chat will re-fetch from the API.
+	 */
+	function clearLocalHistory(opts?: { all?: boolean }): number {
+		if (opts?.all) {
+			const n = clearAllConvCaches();
+			messages = [];
+			historyHasMore = true;
+			loadedKey = '';
+			return n;
+		}
+		const mode = chatMode;
+		const peer = targetUser.trim();
+		const gid = groupId.trim();
+		let key = '';
+		if (mode === 'private' && peer) key = convKeyPrivate(peer);
+		else if (mode === 'group' && gid) key = convKeyGroup(gid);
+		if (key) clearConvCache(key);
+		messages = [];
+		historyHasMore = true;
+		loadedKey = '';
+		return key ? 1 : 0;
 	}
 
 	async function refreshOnlineUsers() {
@@ -1535,9 +1704,9 @@ export function createChatController(opts: {
 			const res = await groupService.members(gid);
 			// Only apply if still viewing this group.
 			if (groupId.trim() !== gid) return;
-			const list = normalizeOnlineList(res.members);
+			const list = normalizeGroupMembers(res.members);
 			groupMembers = list;
-			rememberUsers(list);
+			rememberUsers(list.map((m) => ({ user_id: m.user_id, username: m.username })));
 		} catch {
 			if (groupId.trim() === gid) groupMembers = [];
 		}
@@ -1606,18 +1775,16 @@ export function createChatController(opts: {
 		}
 
 		const plain = local._local_plain ?? local.content;
-		let cipher = plain;
+		// Red packets are published by REST — never re-encrypted / re-sent on the chat WS path.
+		if (local.content_type === 'red_packet') {
+			updateMessageStatus(local.id, 'sent');
+			return;
+		}
+		let cipher: string;
 		try {
-			// Voice / red_packet: content may already be label; re-encrypt plaintext label.
-			if (local.content_type === 'voice') {
-				cipher = await encryptContent(plain || '🎤 Voice message');
-			} else if (local.content_type === 'red_packet') {
-				// Red packets are published by REST — not re-sent here.
-				updateMessageStatus(local.id, 'sent');
-				return;
-			} else {
-				cipher = await encryptContent(plain);
-			}
+			cipher = await encryptContent(
+				local.content_type === 'voice' ? plain || '🎤 Voice message' : plain
+			);
 		} catch (err) {
 			console.error('[crypto] encrypt failed', err);
 			updateMessageStatus(local.id, 'failed');
@@ -1823,7 +1990,7 @@ export function createChatController(opts: {
 			name: name?.trim() || undefined,
 			group_id: customId?.trim() || undefined
 		});
-		joinedGroups = [...new Set([...joinedGroups, g.id])];
+		joinedGroups = appendUnique(joinedGroups, g.id);
 		groupMeta = { ...groupMeta, [g.id]: g };
 		saveJoinedGroups(joinedGroups);
 		if (ws?.readyState === WebSocket.OPEN) {
@@ -1843,6 +2010,54 @@ export function createChatController(opts: {
 		groupId = g.id;
 		await Promise.all([loadGroupHistory(g.id), refreshGroupMembers(g.id)]);
 		return g;
+	}
+
+	/** Owner or admin uploads group icon; updates groupMeta for list + header. */
+	async function uploadGroupAvatar(groupId: string, file: File) {
+		const gid = groupId.trim();
+		if (!gid) throw new Error('group_id required');
+		const res = await groupService.uploadAvatar(gid, file);
+		if (res.group) {
+			groupMeta = { ...groupMeta, [gid]: { ...groupMeta[gid], ...res.group } };
+		} else {
+			groupMeta = {
+				...groupMeta,
+				[gid]: {
+					...(groupMeta[gid] || { id: gid, name: gid, owner_user_id: myUserId }),
+					avatar: res.avatar,
+					avatar_rev: res.avatar_rev
+				}
+			};
+		}
+		return res;
+	}
+
+	/** Owner or admin renames group. */
+	async function renameGroup(groupIdArg: string, name: string) {
+		const gid = groupIdArg.trim();
+		const n = name.trim();
+		if (!gid) throw new Error('group_id required');
+		if (!n) throw new Error('群名不能为空');
+		const g = await groupService.update(gid, { name: n });
+		groupMeta = { ...groupMeta, [gid]: { ...groupMeta[gid], ...g } };
+		return g;
+	}
+
+	/** Owner-only: promote to admin or demote to member. */
+	async function setMemberRole(groupIdArg: string, userId: string, role: 'admin' | 'member') {
+		const gid = groupIdArg.trim();
+		const uid = userId.trim();
+		if (!gid || !uid) throw new Error('参数不完整');
+		const m = await groupService.setMemberRole(gid, uid, role);
+		// Patch local roster if viewing this group.
+		if (groupId === gid && groupMembers.length) {
+			groupMembers = normalizeGroupMembers(
+				groupMembers.map((x) =>
+					x.user_id === uid ? { ...x, role: m.role || role } : x
+				)
+			);
+		}
+		return m;
 	}
 
 	async function dissolveGroup(g: string) {
@@ -1866,7 +2081,7 @@ export function createChatController(opts: {
 		if (!g) return;
 		try {
 			await groupService.join(g);
-			joinedGroups = [...new Set([...joinedGroups, g])];
+			joinedGroups = appendUnique(joinedGroups, g);
 			saveJoinedGroups(joinedGroups);
 			if (ws?.readyState === WebSocket.OPEN) {
 				await wsSendJSON({
@@ -1918,6 +2133,14 @@ export function createChatController(opts: {
 
 	function isGroupOwner(id: string): boolean {
 		return groupMeta[id]?.role === 'owner' || groupMeta[id]?.owner_user_id === myUserId;
+	}
+
+	/** Owner or admin may edit name / avatar. */
+	function isGroupManager(gid: string): boolean {
+		const id = gid.trim();
+		if (!id) return false;
+		const r = groupMeta[id]?.role;
+		return r === 'owner' || r === 'admin' || groupMeta[id]?.owner_user_id === myUserId;
 	}
 
 	async function selectPrivateUser(userId: string, username?: string) {
@@ -1983,30 +2206,31 @@ export function createChatController(opts: {
 
 	/** Sync open meeting status for a group (on select / refresh). */
 	async function refreshGroupMeeting(gid: string) {
-		const id = gid.trim();
+		const id = (gid || '').trim();
 		if (!id) return;
 		try {
 			const st = await livekitService.getMeeting(id);
-			if (!st.active) {
-				const next = { ...activeMeetings };
-				delete next[id];
-				activeMeetings = next;
+			if (!st || st.active !== true) {
+				if (activeMeetings[id]) {
+					const next = { ...activeMeetings };
+					delete next[id];
+					activeMeetings = next;
+				}
 				return;
 			}
-			activeMeetings = {
-				...activeMeetings,
-				[id]: {
-					group_id: id,
-					room: st.room || `grp_${id}`,
-					media: st.media === 'video' ? 'video' : 'audio',
-					started_by: st.started_by || '',
-					started_by_name: st.started_by_name || st.started_by || '',
-					started_at: st.started_at || 0,
-					participant_count: st.participant_count || 0
-				}
+			const snapshot: ActiveGroupMeeting = {
+				group_id: id,
+				room: (st.room && String(st.room)) || `grp_${id}`,
+				media: st.media === 'video' ? 'video' : 'audio',
+				started_by: st.started_by ? String(st.started_by) : '',
+				started_by_name: String(st.started_by_name || st.started_by || ''),
+				started_at: typeof st.started_at === 'number' ? st.started_at : 0,
+				participant_count:
+					typeof st.participant_count === 'number' ? st.participant_count : 0
 			};
+			activeMeetings = { ...activeMeetings, [id]: snapshot };
 		} catch {
-			// ignore (offline / not member)
+			// ignore (offline / not member / 404)
 		}
 	}
 
@@ -2035,7 +2259,7 @@ export function createChatController(opts: {
 		if (firstJoin) {
 			try {
 				await groupService.join(g);
-				joinedGroups = [...new Set([...joinedGroups, g])];
+				joinedGroups = appendUnique(joinedGroups, g);
 				saveJoinedGroups(joinedGroups);
 			} catch {
 				// still try to load history
@@ -2158,8 +2382,17 @@ export function createChatController(opts: {
 		get historyLoading() {
 			return historyLoading;
 		},
+		get historyLoadingOlder() {
+			return historyLoadingOlder;
+		},
+		get historyHasMore() {
+			return historyHasMore;
+		},
 		displayName,
 		hasUnread,
+		hasGroupUnread,
+		typingLabel,
+		isGroupOwner,
 		connect,
 		disconnect,
 		reconnectNow,
@@ -2179,25 +2412,28 @@ export function createChatController(opts: {
 		sendRedPacket,
 		resendMessage,
 		refreshBalance,
-		hasGroupUnread,
 		notifyTyping,
 		notifyTypingStop,
-		typingLabel,
 		recallMessage,
 		joinGroup,
 		leaveGroup,
 		createGroup,
 		dissolveGroup,
 		refreshMyGroups,
+		uploadGroupAvatar,
+		renameGroup,
+		setMemberRole,
+		isGroupManager,
 		groupDisplayName,
-		isGroupOwner,
 		selectPrivateUser,
 		selectGroup,
 		setChatMode,
 		refreshGroupMeeting,
 		setActiveMeeting,
 		loadPrivateHistory,
-		loadGroupHistory
+		loadGroupHistory,
+		loadOlderHistory,
+		clearLocalHistory
 	};
 }
 

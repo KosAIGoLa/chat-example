@@ -246,12 +246,10 @@ func (s *FriendService) ListFriends(me uint) ([]dto.FriendUserDTO, error) {
 		if !ok {
 			continue
 		}
-		online := false
-		if s.hub != nil {
-			_, online = s.hub.GetClient(uidStr(id))
-		}
+		uid := uidStr(id)
+		online := s.hub != nil && s.hub.IsUserOnline(uid)
 		out = append(out, dto.FriendUserDTO{
-			UserID:   uidStr(id),
+			UserID:   uid,
 			Username: u.Username,
 			Online:   online,
 		})

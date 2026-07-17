@@ -6,10 +6,12 @@
 	import ChatHeader from './ChatHeader.svelte';
 	import ChatSidebar from './ChatSidebar.svelte';
 	import GroupMembersPanel from './GroupMembersPanel.svelte';
+	import GroupSettings from './GroupSettings.svelte';
 	import MessageList from './MessageList.svelte';
 	import MessageInput from './MessageInput.svelte';
 	import CallPanel from './CallPanel.svelte';
 	import SendRedPacketDialog from './SendRedPacketDialog.svelte';
+	import { groupAvatarUrl } from '$lib/api/group.service';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
 	import Hash from '@lucide/svelte/icons/hash';
@@ -17,15 +19,26 @@
 	import Phone from '@lucide/svelte/icons/phone';
 	import Video from '@lucide/svelte/icons/video';
 	import Users from '@lucide/svelte/icons/users';
+	import Trash2 from '@lucide/svelte/icons/trash-2';
+	import Crown from '@lucide/svelte/icons/crown';
+	import Settings from '@lucide/svelte/icons/settings';
+	import PanelLeftClose from '@lucide/svelte/icons/panel-left-close';
+	import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
 	import * as Sheet from '$lib/components/ui/sheet';
+	import UserAvatar from './UserAvatar.svelte';
 	import { toastError, toastInfo } from '$lib/ui/notify.svelte';
 	import { typingUI } from '../typing-ui.svelte';
 
+	const SIDEBAR_KEY = 'ws_chat_sidebar_open';
+
 	const userId = auth.user ? String(auth.user.id) : '';
 	let displayUsername = $state(auth.user?.username ?? '');
-	let balance = $state(auth.user?.balance ?? 0);
 	let redPacketOpen = $state(false);
 	let membersOpen = $state(false);
+	let settingsOpen = $state(false);
+	let sidebarOpen = $state(
+		typeof localStorage !== 'undefined' ? localStorage.getItem(SIDEBAR_KEY) !== '0' : true
+	);
 
 	const call = createCallController({
 		userId,
@@ -39,25 +52,19 @@
 			window.location.href = '/login';
 		},
 		onCallEvent: (ev) => call.handleCallEvent(ev),
-		onMeetingEvent: (ev) => call.handleMeetingEvent(ev),
-		onBalanceChange: (b) => {
-			balance = b;
-		}
+		onMeetingEvent: (ev) => call.handleMeetingEvent(ev)
 	});
 
 	/** Reactive module store — updates even from async WS handlers. */
 	const typingHint = $derived(typingUI.hint);
+	/** Mirror controller wallet (also updated by red-packet claims). */
+	const balance = $derived(chat.balance);
 
 	// UI-local fields bound to inputs; synced into controller on action
 	let targetUser = $state('');
 	let groupId = $state('');
 	let inputText = $state('');
 	let callBusy = $state(false);
-
-	// Keep header balance in sync with controller.
-	$effect(() => {
-		balance = chat.balance;
-	});
 
 	// After leaving a group meeting, refresh open-meeting banner for this group.
 	let prevCallPhase = $state(call.phase);
@@ -86,13 +93,69 @@
 		return () => clearInterval(t);
 	});
 
+	const privatePeer = $derived.by(() => {
+		const id = targetUser.trim();
+		if (!id || chat.chatMode !== 'private') return null;
+		const f = chat.friends.find((x) => x.user_id === id);
+		// Prefer friends[].online from presence; never invent online from message traffic.
+		const online = f ? !!f.online : false;
+		return {
+			id,
+			name: chat.displayName(id) || f?.username || id,
+			online
+		};
+	});
+
+	const activeGroup = $derived.by(() => {
+		const id = groupId.trim();
+		if (!id || chat.chatMode !== 'group') return null;
+		const meta = chat.groupMeta[id];
+		const meeting = chat.activeMeetings[id];
+		const role = meta?.role;
+		const isOwner = role === 'owner' || meta?.owner_user_id === userId;
+		const isAdmin = role === 'admin';
+		const canManage = isOwner || isAdmin || chat.isGroupManager(id);
+		return {
+			id,
+			name: chat.groupDisplayName(id) || meta?.name || id,
+			memberCount: meta?.member_count,
+			role,
+			isOwner,
+			isAdmin,
+			canManage,
+			meeting,
+			avatar: meta?.avatar,
+			avatarRev: meta?.avatar_rev ?? 0,
+			meta
+		};
+	});
+
+	function toggleSidebar() {
+		sidebarOpen = !sidebarOpen;
+		try {
+			localStorage.setItem(SIDEBAR_KEY, sidebarOpen ? '1' : '0');
+		} catch {
+			// ignore
+		}
+	}
+
+	function openGroupSettings(gid?: string) {
+		const id = (gid ?? groupId).trim();
+		if (!id) return;
+		if (id !== groupId.trim()) {
+			selectGroup(id);
+		}
+		settingsOpen = true;
+		void chat.refreshGroupMembers(id);
+	}
+
 	const conversationTitle = $derived(
 		chat.chatMode === 'private'
-			? targetUser
-				? `私聊 · ${chat.displayName(targetUser)}`
+			? privatePeer
+				? privatePeer.name
 				: '选择好友开始聊天'
-			: groupId
-				? `#${chat.groupDisplayName(groupId)}`
+			: activeGroup
+				? activeGroup.name
 				: '选择或加入群聊'
 	);
 
@@ -157,9 +220,10 @@
 		groupId = chat.groupId;
 	}
 
-	function onProfileUpdated(name: string, _token: string) {
+	function onProfileUpdated(name: string, _token?: string) {
 		displayUsername = name;
-		// Token already in localStorage; force a clean WS reconnect with the new JWT.
+		// Auth store already updated by ChatHeader; reconnect WS with new JWT.
+		void _token;
 		chat.reconnectNow();
 	}
 
@@ -304,87 +368,184 @@
 	/>
 
 	<div class="flex min-h-0 flex-1 overflow-hidden">
-		<!-- Col 1: conversation list -->
-		<ChatSidebar
-			chatMode={chat.chatMode}
-			bind:targetUser
-			bind:groupId
-			joinedGroups={chat.joinedGroups}
-			groupMeta={chat.groupMeta}
-			friends={chat.friends}
-			incomingRequests={chat.incomingRequests}
-			blacklist={chat.blacklist}
-			onlineUsers={chat.onlineUsers}
-			myUserId={chat.myUserId}
-			unreadPeers={chat.unreadPeers}
-			unreadGroups={chat.unreadGroups}
-			lastPreviews={chat.lastPreviews}
-			onModeChange={(m) => chat.setChatMode(m)}
-			onJoinGroup={joinGroup}
-			onLeaveGroup={(g) => {
-				void chat.leaveGroup(g).then(() => {
+		<!-- Col 1: conversation list (can hide) -->
+		{#if sidebarOpen}
+			<ChatSidebar
+				chatMode={chat.chatMode}
+				bind:targetUser
+				bind:groupId
+				joinedGroups={chat.joinedGroups}
+				groupMeta={chat.groupMeta}
+				friends={chat.friends}
+				incomingRequests={chat.incomingRequests}
+				blacklist={chat.blacklist}
+				onlineUsers={chat.onlineUsers}
+				myUserId={chat.myUserId}
+				unreadPeers={chat.unreadPeers}
+				unreadGroups={chat.unreadGroups}
+				lastPreviews={chat.lastPreviews}
+				activeMeetings={chat.activeMeetings}
+				onModeChange={(m) => chat.setChatMode(m)}
+				onJoinGroup={joinGroup}
+				onLeaveGroup={(g) => {
+					void chat.leaveGroup(g).then(() => {
+						groupId = chat.groupId;
+					});
+				}}
+				onCreateGroup={async (name, customId) => {
+					const g = await chat.createGroup(name, customId);
+					groupId = g.id;
+				}}
+				onDissolveGroup={async (g) => {
+					await chat.dissolveGroup(g);
 					groupId = chat.groupId;
-				});
-			}}
-			onCreateGroup={async (name, customId) => {
-				const g = await chat.createGroup(name, customId);
-				groupId = g.id;
-			}}
-			onDissolveGroup={async (g) => {
-				await chat.dissolveGroup(g);
-				groupId = chat.groupId;
-			}}
-			onSelectGroup={selectGroup}
-			onSelectUser={selectUser}
-			onRefreshOnline={() => chat.refreshOnlineUsers()}
-			onRefreshFriends={() => {
-				chat.refreshFriends();
-				chat.refreshBlacklist();
-			}}
-			onInviteFriend={async (name) => {
-				await chat.inviteFriend(name);
-			}}
-			onAcceptRequest={async (id) => {
-				await chat.acceptFriendRequest(id);
-			}}
-			onRejectRequest={async (id) => {
-				await chat.rejectFriendRequest(id);
-			}}
-			onRemoveFriend={async (uid) => {
-				await chat.removeFriend(uid);
-				if (targetUser === uid) targetUser = '';
-			}}
-			onBlockUser={async (opts) => {
-				const entry = await chat.blockUser(opts);
-				if (targetUser === entry.user_id) targetUser = '';
-			}}
-			onUnblockUser={async (uid) => {
-				await chat.unblockUser(uid);
-			}}
-			onCallUser={async (uid, name, media = 'audio') => {
-				await startCall(media, uid, name);
-			}}
-			callDisabled={callBusy || call.phase !== 'idle'}
-		/>
+				}}
+				onSelectGroup={selectGroup}
+				onSelectUser={selectUser}
+				onRefreshOnline={() => chat.refreshOnlineUsers()}
+				onRefreshFriends={() => {
+					chat.refreshFriends();
+					chat.refreshBlacklist();
+				}}
+				onRefreshGroups={() => {
+					void chat.refreshMyGroups();
+				}}
+				onOpenGroupSettings={(gid) => openGroupSettings(gid)}
+				onInviteFriend={async (name) => {
+					await chat.inviteFriend(name);
+				}}
+				onAcceptRequest={async (id) => {
+					await chat.acceptFriendRequest(id);
+				}}
+				onRejectRequest={async (id) => {
+					await chat.rejectFriendRequest(id);
+				}}
+				onRemoveFriend={async (uid) => {
+					await chat.removeFriend(uid);
+					if (targetUser === uid) targetUser = '';
+				}}
+				onBlockUser={async (opts) => {
+					const entry = await chat.blockUser(opts);
+					if (targetUser === entry.user_id) targetUser = '';
+				}}
+				onUnblockUser={async (uid) => {
+					await chat.unblockUser(uid);
+				}}
+				onCallUser={async (uid, name, media = 'audio') => {
+					await startCall(media, uid, name);
+				}}
+				callDisabled={callBusy || call.phase !== 'idle'}
+			/>
+		{/if}
 
 		<main class="bg-muted/20 flex min-w-0 flex-1 flex-col">
 			<div
-				class="bg-background/90 flex h-14 shrink-0 items-center gap-2 border-b px-4 backdrop-blur md:px-6"
+				class="bg-background/90 flex h-14 shrink-0 items-center gap-2.5 border-b px-3 backdrop-blur md:px-4"
 			>
-				{#if chat.chatMode === 'private'}
-					<div class="bg-primary/10 text-primary flex size-8 items-center justify-center rounded-full">
+				<Button
+					variant="ghost"
+					size="icon"
+					class="size-8 shrink-0"
+					onclick={toggleSidebar}
+					title={sidebarOpen ? '隐藏左侧列表' : '显示左侧列表'}
+					aria-label={sidebarOpen ? '隐藏侧栏' : '显示侧栏'}
+				>
+					{#if sidebarOpen}
+						<PanelLeftClose class="size-4" />
+					{:else}
+						<PanelLeftOpen class="size-4" />
+					{/if}
+				</Button>
+				{#if chat.chatMode === 'private' && privatePeer}
+					<div class="relative shrink-0">
+						<UserAvatar
+							class="size-9"
+							name={privatePeer.name}
+							userId={privatePeer.id}
+							src={`/api/avatar/${encodeURIComponent(privatePeer.id)}`}
+						/>
+						<span
+							class="border-background absolute right-0 bottom-0 size-2.5 rounded-full border-2
+								{privatePeer.online ? 'bg-emerald-500' : 'bg-muted-foreground/40'}"
+							title={privatePeer.online ? '在线' : '离线'}
+						></span>
+					</div>
+				{:else if chat.chatMode === 'private'}
+					<div class="bg-primary/10 text-primary flex size-9 items-center justify-center rounded-full">
 						<User class="size-4" />
 					</div>
+				{:else if chat.chatMode === 'group' && activeGroup}
+					{@const gIcon =
+						activeGroup.avatar || activeGroup.avatarRev
+							? groupAvatarUrl(activeGroup.id, activeGroup.avatarRev)
+							: ''}
+					<button
+						type="button"
+						class="relative shrink-0 rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring"
+						title="群配置"
+						onclick={() => openGroupSettings(activeGroup.id)}
+					>
+						<div
+							class="relative flex size-9 items-center justify-center overflow-hidden rounded-xl text-sm font-semibold text-white shadow-sm"
+							style="background: hsl({(() => {
+								let h = 0;
+								const s = activeGroup.id;
+								for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+								return (h % 300) + 20;
+							})()} 55% 42%)"
+						>
+							{#if gIcon}
+								<img
+									src={gIcon}
+									alt=""
+									class="absolute inset-0 size-full object-cover"
+									onerror={(e) => {
+										(e.currentTarget as HTMLImageElement).style.display = 'none';
+									}}
+								/>
+							{/if}
+							<span class="relative z-0">{activeGroup.name.slice(0, 1).toUpperCase()}</span>
+						</div>
+					</button>
 				{:else}
-					<div class="bg-primary/10 text-primary flex size-8 items-center justify-center rounded-full">
+					<div class="bg-primary/10 text-primary flex size-9 items-center justify-center rounded-full">
 						<Hash class="size-4" />
 					</div>
 				{/if}
 				<div class="min-w-0 flex-1">
-					<span class="block truncate text-sm font-semibold">{conversationTitle}</span>
+					<span class="flex min-w-0 items-center gap-1.5">
+						<span class="truncate text-sm font-semibold">{conversationTitle}</span>
+						{#if activeGroup?.isOwner}
+							<span title="群主"><Crown class="size-3.5 shrink-0 text-amber-500" /></span>
+						{:else if activeGroup?.isAdmin}
+							<span title="管理者" class="text-sky-600 dark:text-sky-400 text-[11px] font-medium">管</span>
+						{/if}
+					</span>
 					{#if typingHint}
 						<span class="block truncate text-[11px] font-normal text-emerald-500">
 							{typingHint}
+						</span>
+					{:else if chat.chatMode === 'private' && privatePeer}
+						<span
+							class="block truncate text-[11px] font-normal
+								{privatePeer.online ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'}"
+						>
+							{privatePeer.online ? '在线' : '离线'}
+						</span>
+					{:else if activeGroup}
+						<span class="text-muted-foreground block truncate text-[11px] font-normal">
+							{#if activeGroup.meeting}
+								<span class="text-emerald-600 dark:text-emerald-400">
+									{activeGroup.meeting.media === 'video' ? '视讯' : '语音'}会议进行中
+								</span>
+								·
+							{/if}
+							{#if typeof activeGroup.memberCount === 'number'}
+								{activeGroup.memberCount} 位成员
+							{:else}
+								群 ID: {activeGroup.id}
+							{/if}
+							· 点头像或「群配置」管理
 						</span>
 					{/if}
 				</div>
@@ -472,11 +633,55 @@
 							variant="ghost"
 							size="sm"
 							class="h-8 gap-1.5 px-2.5"
-							onclick={() => (membersOpen = true)}
-							title="群成员"
+							onclick={() => {
+								membersOpen = true;
+								void chat.refreshGroupMembers(groupId.trim());
+							}}
+							title="群成员清单（角色 · 在线状态）"
 						>
 							<Users class="size-4" />
 							<span class="hidden sm:inline">成员</span>
+						</Button>
+						<Button
+							variant="outline"
+							size="sm"
+							class="h-8 gap-1.5 px-2.5"
+							onclick={() => openGroupSettings(groupId)}
+							title="群配置：群名、群图片、角色、解散"
+						>
+							<Settings class="size-4" />
+							<span class="hidden sm:inline">群配置</span>
+						</Button>
+					{/if}
+					{#if (chat.chatMode === 'private' && targetUser.trim()) || (chat.chatMode === 'group' && groupId.trim())}
+						<Button
+							variant="ghost"
+							size="sm"
+							class="text-muted-foreground h-8 gap-1 px-2"
+							title="清除本机缓存的聊天记录（不影响服务器）"
+							onclick={() => {
+								const hasMsgs = chat.messages.length > 0;
+								if (!hasMsgs && !targetUser && !groupId) {
+									toastInfo('当前没有可清除的本地记录');
+									return;
+								}
+								if (
+									typeof window !== 'undefined' &&
+									!window.confirm(
+										'清除当前会话在本机缓存的历史消息？\n（服务器记录不受影响，重新打开会话可再同步）'
+									)
+								) {
+									return;
+								}
+								const n = chat.clearLocalHistory();
+								toastInfo(
+									n > 0 ? '已清除本机会话历史' : '当前会话本地记录已清空',
+									'本地历史'
+								);
+							}}
+						>
+							<Trash2 class="size-4" />
+							<span class="hidden sm:inline">清本地</span>
 						</Button>
 					{/if}
 					{#if chat.historyLoading}
@@ -540,6 +745,8 @@
 				messages={chat.messages}
 				myUserId={chat.myUserId}
 				loading={chat.historyLoading}
+				loadingOlder={chat.historyLoadingOlder}
+				hasMore={chat.historyHasMore}
 				resolveName={(uid) =>
 					uid === chat.myUserId ? displayUsername || uid : chat.displayName(uid)
 				}
@@ -557,10 +764,10 @@
 				}}
 				onRecall={(msg) => void chat.recallMessage(msg)}
 				onResend={(msg) => void chat.resendMessage(msg)}
-				onBalanceChange={(b) => {
-					balance = b;
+				onBalanceChange={() => {
 					void chat.refreshBalance();
 				}}
+				onLoadOlder={() => chat.loadOlderHistory()}
 			/>
 			<MessageInput
 				chatMode={chat.chatMode}
@@ -596,7 +803,7 @@
 		onClose={() => (redPacketOpen = false)}
 		onSend={async (opts) => {
 			await chat.sendRedPacket(opts);
-			balance = chat.balance;
+			void chat.refreshBalance();
 		}}
 	/>
 
@@ -620,6 +827,64 @@
 								void selectUser(uid, name);
 							}}
 						/>
+					</div>
+				</div>
+			</Sheet.Content>
+		</Sheet.Root>
+
+		<Sheet.Root bind:open={settingsOpen}>
+			<Sheet.Content side="right" class="w-full gap-0 p-0 sm:max-w-md">
+				<div class="flex h-full flex-col">
+					<Sheet.Header class="border-b px-4 py-3">
+						<Sheet.Title>群配置</Sheet.Title>
+						<Sheet.Description>
+							编辑群名与群图片、管理角色、解散群
+						</Sheet.Description>
+					</Sheet.Header>
+					<div class="min-h-0 flex-1 overflow-hidden">
+						{#if groupId.trim()}
+							<GroupSettings
+								groupId={groupId.trim()}
+								meta={chat.groupMeta[groupId.trim()] ?? null}
+								members={chat.groupMembers}
+								myUserId={chat.myUserId}
+								canManage={!!activeGroup?.canManage}
+								isOwner={!!activeGroup?.isOwner}
+								onRename={async (name) => {
+									await chat.renameGroup(groupId.trim(), name);
+									toastInfo('群名已更新', '群配置');
+									void chat.refreshMyGroups();
+								}}
+								onUploadAvatar={async (file) => {
+									await chat.uploadGroupAvatar(groupId.trim(), file);
+									toastInfo('群图片已更新', '群配置');
+								}}
+								onSetRole={async (uid, role) => {
+									await chat.setMemberRole(groupId.trim(), uid, role);
+									toastInfo(
+										role === 'admin' ? '已升级为管理者' : '已降为一般成员',
+										'群配置'
+									);
+								}}
+								onDissolve={async () => {
+									const gid = groupId.trim();
+									await chat.dissolveGroup(gid);
+									settingsOpen = false;
+									groupId = chat.groupId;
+									toastInfo('群已解散', '群配置');
+								}}
+								onLeave={async () => {
+									const gid = groupId.trim();
+									await chat.leaveGroup(gid);
+									settingsOpen = false;
+									groupId = chat.groupId;
+									toastInfo('已退出群', '群配置');
+								}}
+								onRefreshMembers={() => {
+									void chat.refreshGroupMembers(groupId.trim());
+								}}
+							/>
+						{/if}
 					</div>
 				</div>
 			</Sheet.Content>

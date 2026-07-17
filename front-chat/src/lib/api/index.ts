@@ -12,7 +12,7 @@ export { API_BASE, ApiError, request, requestForm, buildAuthedUrl } from './clie
 export { authService, avatarUrl } from './auth.service';
 export type { AvatarUploadResult } from './auth.service';
 export { friendService } from './friend.service';
-export { groupService } from './group.service';
+export { groupService, groupAvatarUrl } from './group.service';
 export { chatService } from './chat.service';
 export { mediaService, buildMediaUrl } from './media.service';
 export { livekitService } from './livekit.service';
@@ -72,6 +72,8 @@ export const api = {
 	createGroup: groupService.create,
 	listMyGroups: groupService.listMine,
 	dissolveGroup: groupService.dissolve,
+	updateGroup: groupService.update,
+	setMemberRole: groupService.setMemberRole,
 	joinGroup: groupService.join,
 	leaveGroup: groupService.leave,
 	getGroupMembers: groupService.members,

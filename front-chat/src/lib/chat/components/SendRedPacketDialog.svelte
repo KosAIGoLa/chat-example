@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { ChatMode, OnlineUser } from '../types';
+	import type { ChatMode } from '../types';
 	import { Button } from '$lib/components/ui/button';
 	import LoaderCircle from '@lucide/svelte/icons/loader-circle';
 	import X from '@lucide/svelte/icons/x';
@@ -12,7 +12,7 @@
 		chatMode: ChatMode;
 		balance: number;
 		/** Group members for designated picker (group chat only). */
-		members?: OnlineUser[];
+		members?: { user_id: string; username: string }[];
 		myUserId?: string;
 		onClose: () => void;
 		onSend: (opts: {
@@ -33,8 +33,8 @@
 	let greeting = $state('恭喜发财，大吉大利');
 	let busy = $state(false);
 	let errorMsg = $state('');
-	/** selected user ids for designated */
-	let selected = $state<Set<string>>(new Set());
+	/** selected user ids for designated (array avoids Set reactivity lint) */
+	let selected = $state<string[]>([]);
 
 	const selectableMembers = $derived(
 		(members ?? []).filter((m) => m.user_id && m.user_id !== myUserId)
@@ -45,27 +45,27 @@
 			errorMsg = '';
 			busy = false;
 			groupKind = 'group';
-			selected = new Set();
+			selected = [];
 			if (chatMode === 'private') count = '1';
 		}
 	});
 
 	function toggleMember(uid: string) {
-		const next = new Set(selected);
-		if (next.has(uid)) next.delete(uid);
-		else next.add(uid);
-		selected = next;
-		// keep count in sync for display
-		count = String(next.size || 1);
+		if (selected.includes(uid)) {
+			selected = selected.filter((id) => id !== uid);
+		} else {
+			selected = [...selected, uid];
+		}
+		count = String(selected.length || 1);
 	}
 
 	function selectAll() {
-		selected = new Set(selectableMembers.map((m) => m.user_id));
-		count = String(selected.size || 1);
+		selected = selectableMembers.map((m) => m.user_id);
+		count = String(selected.length || 1);
 	}
 
 	function clearSelection() {
-		selected = new Set();
+		selected = [];
 		count = '1';
 	}
 
@@ -245,7 +245,7 @@
 							onclick={() => {
 								groupKind = 'designated';
 								errorMsg = '';
-								if (selected.size) count = String(selected.size);
+								if (selected.length) count = String(selected.length);
 							}}
 						>
 							指定红包
@@ -311,7 +311,7 @@
 					>
 						<div class="mb-2 flex items-center justify-between">
 							<p class="text-muted-foreground text-[11px] font-medium tracking-wide">
-								指定领取人 · 已选 {selected.size} 人
+								指定领取人 · 已选 {selected.length} 人
 							</p>
 							<div class="flex gap-2">
 								<button
@@ -335,7 +335,7 @@
 						{:else}
 							<div class="max-h-44 space-y-1 overflow-y-auto pr-0.5">
 								{#each selectableMembers as m (m.user_id)}
-									{@const checked = selected.has(m.user_id)}
+									{@const checked = selected.includes(m.user_id)}
 									<button
 										type="button"
 										class={cn(
@@ -370,9 +370,9 @@
 								{/each}
 							</div>
 						{/if}
-						{#if selected.size > 0}
+						{#if selected.length > 0}
 							<p class="text-muted-foreground mt-2 text-[11px]">
-								共 {selected.size} 份 · 每人约 {Math.floor(Math.max(1, Number(amount) || 0) / selected.size)} 币（均分）
+								共 {selected.length} 份 · 每人约 {Math.floor(Math.max(1, Number(amount) || 0) / selected.length)} 币（均分）
 							</p>
 						{/if}
 					</div>
@@ -415,7 +415,7 @@
 						</div>
 						<div class="bg-[#a81e14] py-1 text-center text-[9px] text-amber-100/70">
 							{chatMode === 'group' && groupKind === 'designated'
-								? `指定 ${selected.size || 0} 人`
+								? `指定 ${selected.length || 0} 人`
 								: '预览'}
 						</div>
 					</div>

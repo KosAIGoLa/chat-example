@@ -6,7 +6,7 @@ interface AuthState {
 }
 
 function createAuthStore() {
-	let state = $state<AuthState>({
+	const state = $state<AuthState>({
 		token: null,
 		user: null
 	});

@@ -42,11 +42,16 @@ func SetupRouter(
 		// Message body encryption key (AES-GCM) for WebSocket chat content.
 		api.GET("/crypto/key", chatCtrl.GetCryptoKey)
 
-		// Durable groups: create / list / dissolve
+		// Durable groups: create / list / search / dissolve / icon
 		api.POST("/groups", groupCtrl.Create)
 		api.GET("/groups", groupCtrl.ListMine)
+		// Search must be registered before /:group_id so "search" is not treated as an id.
+		api.GET("/groups/search", groupCtrl.Search)
 		api.GET("/groups/:group_id", groupCtrl.Get)
+		api.PATCH("/groups/:group_id", groupCtrl.Update)
 		api.POST("/groups/:group_id/dissolve", groupCtrl.Dissolve)
+		api.POST("/groups/:group_id/avatar", groupCtrl.UploadAvatar)
+		api.PATCH("/groups/:group_id/members/:user_id", groupCtrl.SetMemberRole)
 
 		api.POST("/groups/join", chatCtrl.JoinGroup)
 		api.POST("/groups/leave", chatCtrl.LeaveGroup)
@@ -91,6 +96,10 @@ func SetupRouter(
 
 	// Avatar image (public read for <img src> — no secrets in file).
 	r.GET("/api/avatar/:user_id", authCtrl.GetAvatar)
+	// Group icon (public read).
+	if groupCtrl != nil {
+		r.GET("/api/group-avatar/:group_id", groupCtrl.GetAvatar)
+	}
 
 	// WebSocket (protected via query token)
 	r.GET("/ws", func(c *gin.Context) {
