@@ -22,6 +22,7 @@ type FriendService struct {
 	offline *OfflineService
 	nats    *NATSService
 	store   *MessageStore
+	cache   *ListCache
 }
 
 func NewFriendService(db *gorm.DB, hub *Hub) *FriendService {
@@ -41,6 +42,39 @@ func (s *FriendService) SetNATS(ns *NATSService) {
 // SetMessageStore wires message metadata cleanup on unfriend.
 func (s *FriendService) SetMessageStore(ms *MessageStore) {
 	s.store = ms
+}
+
+// SetCache wires Redis list cache (optional).
+func (s *FriendService) SetCache(c *ListCache) {
+	s.cache = c
+}
+
+func (s *FriendService) invalidateFriendLists(userIDs ...uint) {
+	if s.cache == nil {
+		return
+	}
+	keys := make([]string, 0, len(userIDs)*3)
+	for _, id := range userIDs {
+		if id == 0 {
+			continue
+		}
+		keys = append(keys, KeyFriends(id), KeyIncoming(id), KeyOutgoing(id))
+	}
+	s.cache.Del(keys...)
+}
+
+func (s *FriendService) invalidateBlacklist(userID uint) {
+	if s.cache == nil || userID == 0 {
+		return
+	}
+	s.cache.Del(KeyBlacklist(userID), KeyFriends(userID))
+}
+
+func (s *FriendService) invalidatePrivatePins(a, b uint) {
+	if s.cache == nil || a == 0 || b == 0 {
+		return
+	}
+	s.cache.Del(KeyPrivatePins(a, b))
 }
 
 func uidStr(id uint) string {
@@ -169,6 +203,7 @@ func (s *FriendService) SendRequest(fromID uint, username, toUserIDStr string) (
 		if err := s.db.Save(&prev).Error; err != nil {
 			return nil, err
 		}
+		s.invalidateFriendLists(fromID, to.ID)
 		return s.toRequestDTO(&prev)
 	}
 
@@ -180,6 +215,7 @@ func (s *FriendService) SendRequest(fromID uint, username, toUserIDStr string) (
 	if err := s.db.Create(&req).Error; err != nil {
 		return nil, err
 	}
+	s.invalidateFriendLists(fromID, to.ID)
 	return s.toRequestDTO(&req)
 }
 
@@ -214,6 +250,7 @@ func (s *FriendService) AcceptRequest(me uint, requestID uint) (*dto.FriendReque
 		Where("from_user_id = ? AND to_user_id = ? AND status = ?", req.ToUserID, req.FromUserID, model.FriendPending).
 		Update("status", model.FriendAccepted).Error
 
+	s.invalidateFriendLists(me, req.FromUserID)
 	return s.toRequestDTO(&req)
 }
 
@@ -233,13 +270,41 @@ func (s *FriendService) RejectRequest(me uint, requestID uint) (*dto.FriendReque
 	if err := s.db.Save(&req).Error; err != nil {
 		return nil, err
 	}
+	s.invalidateFriendLists(me, req.FromUserID)
 	return s.toRequestDTO(&req)
+}
+
+// isUserOnline reports whether a user is online on this instance (hub) or
+// has a fresh remote presence mark (another instance's KV entry).
+func (s *FriendService) isUserOnline(userID string) bool {
+	if userID == "" {
+		return false
+	}
+	if s.hub != nil && s.hub.IsUserOnline(userID) {
+		return true
+	}
+	if s.nats != nil && s.nats.IsPresentOnline(userID, 90*time.Second) {
+		return true
+	}
+	return false
 }
 
 // ListFriends returns accepted friends with online flag.
 // Peers I blocked are omitted here (they appear on the blacklist instead);
 // friendship rows are kept so Unblock restores them to this list.
+// Redis caches identity only; online is always recomputed on read (never trusted from cache).
 func (s *FriendService) ListFriends(me uint) ([]dto.FriendUserDTO, error) {
+	key := KeyFriends(me)
+	if s.cache != nil {
+		var cached []dto.FriendUserDTO
+		if s.cache.GetJSON(key, &cached) {
+			for i := range cached {
+				cached[i].Online = s.isUserOnline(cached[i].UserID)
+			}
+			return cached, nil
+		}
+	}
+
 	var rows []model.Friendship
 	if err := s.db.Where("user_a_id = ? OR user_b_id = ?", me, me).Find(&rows).Error; err != nil {
 		return nil, err
@@ -253,7 +318,11 @@ func (s *FriendService) ListFriends(me uint) ([]dto.FriendUserDTO, error) {
 		}
 	}
 	if len(ids) == 0 {
-		return []dto.FriendUserDTO{}, nil
+		out := []dto.FriendUserDTO{}
+		if s.cache != nil {
+			s.cache.SetJSON(key, out)
+		}
+		return out, nil
 	}
 	// One-way: hide people I blocked (not people who blocked me).
 	var blockedRows []model.Blacklist
@@ -280,34 +349,69 @@ func (s *FriendService) ListFriends(me uint) ([]dto.FriendUserDTO, error) {
 			continue
 		}
 		uid := uidStr(id)
-		online := s.hub != nil && s.hub.IsUserOnline(uid)
 		out = append(out, dto.FriendUserDTO{
 			UserID:   uid,
 			Username: u.Username,
-			Online:   online,
+			Online:   s.isUserOnline(uid),
 		})
+	}
+	if s.cache != nil {
+		// Never persist Online into Redis — always recompute from hub/KV on read.
+		durable := make([]dto.FriendUserDTO, len(out))
+		for i := range out {
+			durable[i] = dto.FriendUserDTO{UserID: out[i].UserID, Username: out[i].Username}
+		}
+		s.cache.SetJSON(key, durable)
 	}
 	return out, nil
 }
 
 // ListIncoming returns pending requests where I am the target.
 func (s *FriendService) ListIncoming(me uint) ([]dto.FriendRequestDTO, error) {
+	key := KeyIncoming(me)
+	if s.cache != nil {
+		var cached []dto.FriendRequestDTO
+		if s.cache.GetJSON(key, &cached) {
+			return cached, nil
+		}
+	}
 	var rows []model.FriendRequest
 	if err := s.db.Where("to_user_id = ? AND status = ?", me, model.FriendPending).
 		Order("created_at desc").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return s.mapRequests(rows)
+	out, err := s.mapRequests(rows)
+	if err != nil {
+		return nil, err
+	}
+	if s.cache != nil {
+		s.cache.SetJSON(key, out)
+	}
+	return out, nil
 }
 
 // ListOutgoing returns pending requests I sent.
 func (s *FriendService) ListOutgoing(me uint) ([]dto.FriendRequestDTO, error) {
+	key := KeyOutgoing(me)
+	if s.cache != nil {
+		var cached []dto.FriendRequestDTO
+		if s.cache.GetJSON(key, &cached) {
+			return cached, nil
+		}
+	}
 	var rows []model.FriendRequest
 	if err := s.db.Where("from_user_id = ? AND status = ?", me, model.FriendPending).
 		Order("created_at desc").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return s.mapRequests(rows)
+	out, err := s.mapRequests(rows)
+	if err != nil {
+		return nil, err
+	}
+	if s.cache != nil {
+		s.cache.SetJSON(key, out)
+	}
+	return out, nil
 }
 
 // RemoveFriend deletes the friendship pair, cleans request rows, and clears
@@ -333,6 +437,8 @@ func (s *FriendService) RemoveFriend(me, peer uint) (peerID string, err error) {
 
 	// Wipe private history between the pair (server + offline inbox).
 	s.ClearPrivateConversation(me, peer)
+	s.invalidateFriendLists(me, peer)
+	s.invalidatePrivatePins(me, peer)
 	return uidStr(peer), nil
 }
 
@@ -353,6 +459,7 @@ func (s *FriendService) ClearPrivateConversation(a, b uint) {
 	aStr, bStr := uidStr(a), uidStr(b)
 	// Drop shared pins with the history wipe.
 	_ = s.db.Where("user_a_id = ? AND user_b_id = ?", ua, ub).Delete(&model.PrivatePin{}).Error
+	s.invalidatePrivatePins(a, b)
 	if s.offline != nil {
 		s.offline.ClearBetween(aStr, bStr)
 	}
@@ -406,6 +513,8 @@ func (s *FriendService) BlockUser(me uint, username, userIDStr string) (*dto.Bla
 	if err := s.db.Create(&row).Error; err != nil {
 		return nil, err
 	}
+	s.invalidateBlacklist(me)
+	s.invalidateFriendLists(me, peer.ID)
 	return &dto.BlacklistUserDTO{
 		UserID:    uidStr(peer.ID),
 		Username:  peer.Username,
@@ -426,17 +535,30 @@ func (s *FriendService) UnblockUser(me, peer uint) error {
 	if res.RowsAffected == 0 {
 		return errors.New("user is not in your blacklist")
 	}
+	s.invalidateBlacklist(me)
+	s.invalidateFriendLists(me, peer)
 	return nil
 }
 
 // ListBlacklist returns users I blocked.
 func (s *FriendService) ListBlacklist(me uint) ([]dto.BlacklistUserDTO, error) {
+	key := KeyBlacklist(me)
+	if s.cache != nil {
+		var cached []dto.BlacklistUserDTO
+		if s.cache.GetJSON(key, &cached) {
+			return cached, nil
+		}
+	}
 	var rows []model.Blacklist
 	if err := s.db.Where("user_id = ?", me).Order("created_at desc").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	if len(rows) == 0 {
-		return []dto.BlacklistUserDTO{}, nil
+		out := []dto.BlacklistUserDTO{}
+		if s.cache != nil {
+			s.cache.SetJSON(key, out)
+		}
+		return out, nil
 	}
 	ids := make([]uint, 0, len(rows))
 	for _, r := range rows {
@@ -459,6 +581,9 @@ func (s *FriendService) ListBlacklist(me uint) ([]dto.BlacklistUserDTO, error) {
 			Username:  name,
 			CreatedAt: r.CreatedAt.Unix(),
 		})
+	}
+	if s.cache != nil {
+		s.cache.SetJSON(key, out)
 	}
 	return out, nil
 }
@@ -535,6 +660,18 @@ func (s *FriendService) ListPrivatePins(me uint, peerIDStr string) ([]dto.Privat
 		return nil, errors.New("not friends")
 	}
 	ua, ub := orderedPair(me, peer)
+	key := KeyPrivatePins(ua, ub)
+	if s.cache != nil {
+		var cached []dto.PrivatePinDTO
+		if s.cache.GetJSON(key, &cached) {
+			// peer_id is viewer-relative; re-stamp for this reader.
+			peerStr := uidStr(peer)
+			for i := range cached {
+				cached[i].PeerID = peerStr
+			}
+			return cached, nil
+		}
+	}
 	var rows []model.PrivatePin
 	if err := s.db.Where("user_a_id = ? AND user_b_id = ?", ua, ub).
 		Order("created_at desc").Find(&rows).Error; err != nil {
@@ -544,6 +681,9 @@ func (s *FriendService) ListPrivatePins(me uint, peerIDStr string) ([]dto.Privat
 	peerStr := uidStr(peer)
 	for _, r := range rows {
 		out = append(out, toPrivatePinDTO(r, peerStr))
+	}
+	if s.cache != nil {
+		s.cache.SetJSON(key, out)
 	}
 	return out, nil
 }
@@ -628,6 +768,7 @@ func (s *FriendService) AddPrivatePins(me uint, peerIDStr string, items []dto.Ad
 	if len(out) == 0 {
 		return nil, errors.New("failed to pin any message")
 	}
+	s.invalidatePrivatePins(me, peer)
 	return out, nil
 }
 
@@ -656,6 +797,7 @@ func (s *FriendService) RemovePrivatePin(me uint, peerIDStr, messageID string) e
 	if res.RowsAffected == 0 {
 		return errors.New("pin not found")
 	}
+	s.invalidatePrivatePins(me, peer)
 	return nil
 }
 

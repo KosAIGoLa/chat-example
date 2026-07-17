@@ -79,8 +79,11 @@ export function createConversationNav(deps: {
 		if (!w.wsSession.isCurrentSocket(socket, gen)) return;
 		void w.reloadActiveHistory();
 		if (s.chatMode === 'group' && s.groupId.trim()) {
-			void w.refreshGroupMembers(s.groupId.trim());
-			void w.refreshAnnouncements(s.groupId.trim());
+			const gid = s.groupId.trim();
+			void w.refreshGroupMembers(gid);
+			void w.refreshAnnouncements(gid);
+			// Catch-up open meeting after reconnect (no polling).
+			void w.refreshGroupMeeting(gid);
 		} else if (s.chatMode === 'private' && s.targetUser.trim()) {
 			void w.refreshAnnouncements(s.targetUser.trim());
 		}
@@ -108,6 +111,7 @@ export function createConversationNav(deps: {
 			await Promise.all([
 				w.loadGroupHistory(g),
 				w.refreshGroupMembers(g),
+				w.refreshGroupMeeting(g),
 				w.refreshMyGroups()
 			]);
 		} catch (err) {

@@ -33,7 +33,13 @@ export function createFriendsApi(deps: FriendsDeps) {
 	async function refreshFriends() {
 		try {
 			const res = await friendService.listFriends();
-			deps.setFriends(res.friends ?? []);
+			const fromAPI = res.friends ?? [];
+			deps.setFriends(
+				fromAPI.map((f) => ({
+					...f,
+					online: !!f.online
+				}))
+			);
 			for (const f of deps.getFriends()) {
 				deps.rememberUsers([{ user_id: f.user_id, username: f.username }]);
 			}

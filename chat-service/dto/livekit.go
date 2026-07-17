@@ -74,8 +74,10 @@ type MeetingStatus struct {
 // MeetingEvent is pushed over WebSocket for group conference lifecycle.
 // type: "meeting" — distinct from private "call" ring signaling.
 type MeetingEvent struct {
-	Type             string `json:"type"`   // "meeting"
-	Action           string `json:"action"` // started | ended | joined | left
+	Type string `json:"type"` // "meeting"
+	// Action: started | ended | joined | left | snapshot
+	// snapshot = catch-up after join_group / reconnect (no toast).
+	Action           string `json:"action"`
 	Room             string `json:"room"`
 	Media            string `json:"media,omitempty"` // audio | video
 	From             string `json:"from"`

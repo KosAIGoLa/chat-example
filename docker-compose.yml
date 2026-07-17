@@ -1,28 +1,47 @@
 services:
   nats:
     image: nats:2.14.3-alpine
-    # JetStream (NATS Streaming 的官方替代): -js 开启, -sd 持久化目录, -m 监控端口
+    # JetStream ON via nats.conf (store_dir, max_file_store, max_memory_store).
+    # Do not pass -js alone without max_file_store — Docker free-disk caps store ~0.5–1GiB
+    # and breaks stream create when MaxBytes is larger.
     command:
-      - "-js"
-      - "-sd"
-      - "/data"
-      - "-m"
-      - "8222"
+      - "-c"
+      - "/etc/nats/nats.conf"
     ports:
       - "4222:4222"   # client
       - "8222:8222"   # monitoring (/jsz, /healthz, /varz)
     volumes:
       - nats-data:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      # Prefer /jsz (proves JetStream is up). /healthz can 503 while streams
+      # still hold MaxBytes larger than a previous max_file_store.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/jsz | grep -q '\"max_storage\"'"]
       interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine
+    # Server-side pool headroom for chat-service (client max_open defaults to 50).
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - idle_in_transaction_session_timeout=30000
+      - -c
+      - statement_timeout=30000
     environment:
       POSTGRES_USER: chat
       POSTGRES_PASSWORD: chatpass
@@ -33,6 +52,46 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U chat -d chatdb"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # Redis — list read-through cache (friends / groups / pins / announcements)
+  # Password: REDIS_PASSWORD (required). Default is for local dev only — change in production.
+  redis:
+    # Redis 8 (official alpine). Tracks latest 8.x alpine builds.
+    image: redis:8-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-chatredis_change_me}
+      # Memory + connection tuning for list cache
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --tcp-keepalive
+      - "60"
+      - --timeout
+      - "0"
+      - --tcp-backlog
+      - "511"
+      - --hz
+      - "10"
+    environment:
+      # Used by healthcheck only (server auth is --requirepass above)
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-chatredis_change_me}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      # -a must match requirepass; --no-auth-warning keeps logs clean
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-chatredis_change_me}", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -78,15 +137,36 @@ services:
     environment:
       - SERVER_ADDR=:8080
       - NATS_URL=nats://nats:4222
+      # Must be ≤ jetstream.max_file_store in nats.conf (default 2GB)
+      - NATS_STREAM_MAX_BYTES=${NATS_STREAM_MAX_BYTES:-1G}
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=chat
       - DB_PASSWORD=chatpass
       - DB_NAME=chatdb
+      # Postgres client pool (database/sql)
+      - DB_MAX_OPEN_CONNS=${DB_MAX_OPEN_CONNS:-50}
+      - DB_MAX_IDLE_CONNS=${DB_MAX_IDLE_CONNS:-10}
+      - DB_CONN_MAX_LIFETIME=${DB_CONN_MAX_LIFETIME:-1h}
+      - DB_CONN_MAX_IDLE_TIME=${DB_CONN_MAX_IDLE_TIME:-10m}
       - JWT_SECRET=4e2d5fb9300d10a7d21d2fdb1e4d813fb9d55dff75d7a2c9d8b13ec61a99f3e0f26cb6d92efc5e5b29c4f0fcd54cfe758d49893c5d97a5d1d87d88bb6d6b8d42
       - MSG_CRYPTO_KEY=4YvS3j8M4wq2w2sQJv8S3JxQq7Q9iW4xQ6v9bW8H7nA
       - MEDIA_DIR=/app/data/voice
       - SHUTDOWN_TIMEOUT=15s
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-chatredis_change_me}
+      - REDIS_DB=0
+      - REDIS_LIST_TTL=10m
+      # Redis client pool (go-redis)
+      - REDIS_POOL_SIZE=${REDIS_POOL_SIZE:-50}
+      - REDIS_MIN_IDLE_CONNS=${REDIS_MIN_IDLE_CONNS:-5}
+      - REDIS_MAX_IDLE_CONNS=${REDIS_MAX_IDLE_CONNS:-20}
+      - REDIS_POOL_TIMEOUT=${REDIS_POOL_TIMEOUT:-4s}
+      - REDIS_CONN_MAX_IDLE_TIME=${REDIS_CONN_MAX_IDLE_TIME:-5m}
+      - REDIS_CONN_MAX_LIFETIME=${REDIS_CONN_MAX_LIFETIME:-30m}
+      - REDIS_DIAL_TIMEOUT=${REDIS_DIAL_TIMEOUT:-3s}
+      - REDIS_READ_TIMEOUT=${REDIS_READ_TIMEOUT:-2s}
+      - REDIS_WRITE_TIMEOUT=${REDIS_WRITE_TIMEOUT:-2s}
       # LiveKit — API key/secret must match livekit.yaml `keys`
       - LIVEKIT_API_KEY=devkey
       - LIVEKIT_API_SECRET=secret_livekit_dev_change_me_32chars!!
@@ -98,6 +178,8 @@ services:
       nats:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       livekit:
         condition: service_started
@@ -122,4 +204,5 @@ services:
 volumes:
   pgdata:
   nats-data:
+  redis-data:
   voice-data:

@@ -33,12 +33,81 @@ export MSG_CRYPTO_KEY=change-me-crypto
 export MEDIA_DIR=./data/voice
 export SERVER_ADDR=:8080
 export SHUTDOWN_TIMEOUT=15s   # graceful stop budget (SIGINT/SIGTERM)
+export REDIS_ADDR=127.0.0.1:6379   # empty = disable list cache
+export REDIS_PASSWORD=chatredis_change_me   # must match redis --requirepass
+export REDIS_LIST_TTL=10m
+
+# Postgres / Redis client pools (optional; defaults shown)
+export DB_MAX_OPEN_CONNS=50
+export DB_MAX_IDLE_CONNS=10
+export DB_CONN_MAX_LIFETIME=1h
+export DB_CONN_MAX_IDLE_TIME=10m
+export REDIS_POOL_SIZE=50
+export REDIS_MIN_IDLE_CONNS=5
+export REDIS_MAX_IDLE_CONNS=20
 
 # one-shot
 go run ./cmd/server
 # or
 make run
 ```
+
+## Connection pools
+
+| Target | Env | Default | Notes |
+|--------|-----|---------|--------|
+| Postgres open | `DB_MAX_OPEN_CONNS` | 50 | Concurrent DB connections per process |
+| Postgres idle | `DB_MAX_IDLE_CONNS` | 10 | Kept warm in pool |
+| Postgres lifetime | `DB_CONN_MAX_LIFETIME` | 1h | Recycle long-lived conns |
+| Postgres idle time | `DB_CONN_MAX_IDLE_TIME` | 10m | Close unused idle conns |
+| Redis pool | `REDIS_POOL_SIZE` | 50 | Max connections in go-redis pool |
+| Redis min idle | `REDIS_MIN_IDLE_CONNS` | 5 | Warm idle conns |
+| Redis max idle | `REDIS_MAX_IDLE_CONNS` | 20 | Cap idle pool |
+| Redis pool wait | `REDIS_POOL_TIMEOUT` | 4s | Wait for free conn |
+| Redis I/O | `REDIS_DIAL/READ/WRITE_TIMEOUT` | 3s / 2s / 2s | Per-op timeouts |
+
+Rule of thumb: `DB_MAX_OPEN_CONNS × service_replicas < Postgres max_connections` (compose sets `max_connections=200`).
+
+Compose also tunes server-side Redis (`maxmemory` / `allkeys-lru`) and Postgres buffers — see `docker-compose.yml`.
+
+## Redis list cache
+
+Read-through for hot lists (no CUD → Redis; CUD → invalidate → next list refills):
+
+| List | Key pattern | Invalidate on |
+|------|-------------|----------------|
+| Friends | `list:friends:{uid}` | accept / remove / block / unblock |
+| Incoming / outgoing invites | `list:friends:incoming\|outgoing:{uid}` | send / accept / reject |
+| Blacklist | `list:blacklist:{uid}` | block / unblock |
+| My groups | `list:groups:mine:{uid}` | create / join / leave / dissolve / rename / avatar / role |
+| Group members | `list:group:members:{gid}` | join / leave / dissolve / role |
+| Group announcements | `list:group:ann:{gid}` | pin / unpin |
+| Private pins | `list:private:pins:{a}:{b}` | pin / unpin / unfriend |
+
+`online` flags on friends/members are **not** trusted from cache — refreshed from the hub on every read.
+
+**Password required:** Redis is started with `--requirepass`. Set the same value in:
+
+- root `.env` → `REDIS_PASSWORD=...` (compose injects into `redis` + `ws-server`)
+- or export `REDIS_PASSWORD` when running Go locally
+
+Default (local only): `chatredis_change_me` — **change in production**.
+
+```bash
+# local redis (uses REDIS_PASSWORD from .env / compose default)
+docker compose up -d redis
+
+# manual redis with password
+docker run -p 6379:6379 redis:8-alpine \
+  redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
+
+# check auth
+redis-cli -a "$REDIS_PASSWORD" --no-auth-warning ping
+```
+
+- **关闭缓存**：`REDIS_ADDR=`（空）  
+- **密码错误 / 连不上**：日志告警后降级为纯 DB，服务仍可启动  
+- TTL 默认 `10m`（`REDIS_LIST_TTL`）
 
 ## Hot reload (local dev)
 
@@ -98,6 +167,26 @@ sudo systemctl restart ws-server
 | `deploy/systemd/install.sh` | build + enable |
 
 Default install prefix: `/opt/ws-ex/chat-service` (override with `PREFIX=...`).
+
+## NATS JetStream
+
+JetStream is **enabled** via repo-root [`nats.conf`](../nats.conf) (compose mounts it into the `nats` service):
+
+| Setting | Value | Purpose |
+|---------|--------|---------|
+| `jetstream.store_dir` | `/data` | Persistent volume `nats-data` |
+| `max_file_store` | `10GB` | Server file budget for streams |
+| `max_memory_store` | `512MB` | KV / memory streams |
+| Stream `CHAT_MESSAGES` | `NATS_STREAM_MAX_BYTES` (default `1G`) | App soft cap ≤ server budget |
+
+Monitor: http://localhost:8222/jsz · http://localhost:8222/varz
+
+Local NATS without compose:
+
+```bash
+nats-server -c nats.conf
+# or: nats-server -js -sd ./data/nats -m 8222
+```
 
 ## Docker
 

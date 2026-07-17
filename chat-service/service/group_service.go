@@ -23,6 +23,7 @@ type GroupService struct {
 	db      *gorm.DB
 	hub     *Hub
 	chatSvc *ChatService
+	cache   *ListCache
 }
 
 func NewGroupService(db *gorm.DB, hub *Hub) *GroupService {
@@ -32,6 +33,52 @@ func NewGroupService(db *gorm.DB, hub *Hub) *GroupService {
 // SetChatService links system notices (optional).
 func (s *GroupService) SetChatService(cs *ChatService) {
 	s.chatSvc = cs
+}
+
+// SetCache wires Redis list cache (optional).
+func (s *GroupService) SetCache(c *ListCache) {
+	s.cache = c
+}
+
+func (s *GroupService) invalidateGroupsMine(userIDs ...uint) {
+	if s.cache == nil {
+		return
+	}
+	keys := make([]string, 0, len(userIDs))
+	for _, id := range userIDs {
+		if id != 0 {
+			keys = append(keys, KeyGroupsMine(id))
+		}
+	}
+	s.cache.Del(keys...)
+}
+
+func (s *GroupService) invalidateGroupMembers(groupID string) {
+	if s.cache == nil || groupID == "" {
+		return
+	}
+	s.cache.Del(KeyGroupMembers(groupID))
+}
+
+func (s *GroupService) invalidateGroupAnnouncements(groupID string) {
+	if s.cache == nil || groupID == "" {
+		return
+	}
+	s.cache.Del(KeyGroupAnnouncements(groupID))
+}
+
+// invalidateGroupAll drops members + announcements (+ optional mine lists for members).
+func (s *GroupService) invalidateGroupAll(groupID string, memberUserIDs ...uint) {
+	if s.cache == nil {
+		return
+	}
+	keys := []string{KeyGroupMembers(groupID), KeyGroupAnnouncements(groupID)}
+	for _, id := range memberUserIDs {
+		if id != 0 {
+			keys = append(keys, KeyGroupsMine(id))
+		}
+	}
+	s.cache.Del(keys...)
 }
 
 func genGroupID() string {
@@ -97,6 +144,8 @@ func (s *GroupService) Create(ownerID uint, name, customID string) (*dto.GroupDT
 		s.hub.JoinGroupAll(id, uid)
 	}
 
+	s.invalidateGroupsMine(ownerID)
+	s.invalidateGroupMembers(id)
 	return s.toDTO(&g, model.GroupRoleOwner, 1), nil
 }
 
@@ -128,6 +177,8 @@ func (s *GroupService) Join(userID uint, groupID string) (*dto.GroupDTO, error) 
 		role = model.GroupRoleOwner
 	}
 	count := s.memberCount(groupID)
+	s.invalidateGroupsMine(userID)
+	s.invalidateGroupMembers(groupID)
 	return s.toDTO(&g, role, count), nil
 }
 
@@ -150,6 +201,8 @@ func (s *GroupService) Leave(userID uint, groupID string) error {
 	if res.Error != nil {
 		return res.Error
 	}
+	s.invalidateGroupsMine(userID)
+	s.invalidateGroupMembers(groupID)
 	return nil
 }
 
@@ -180,10 +233,16 @@ func (s *GroupService) Dissolve(ownerID uint, groupID string) (memberIDs []strin
 		if err := tx.Where("group_id = ?", groupID).Delete(&model.GroupMember{}).Error; err != nil {
 			return err
 		}
+		_ = tx.Where("group_id = ?", groupID).Delete(&model.GroupAnnouncement{}).Error
 		return tx.Where("id = ?", groupID).Delete(&model.Group{}).Error
 	}); err != nil {
 		return nil, "", err
 	}
+	uids := make([]uint, 0, len(members))
+	for _, m := range members {
+		uids = append(uids, m.UserID)
+	}
+	s.invalidateGroupAll(groupID, uids...)
 	return memberIDs, name, nil
 }
 
@@ -282,13 +341,25 @@ func scoreGroupMatch(q, id, name string) int {
 }
 
 // ListMine returns groups the user belongs to.
+// Cached in Redis until membership/group metadata changes.
 func (s *GroupService) ListMine(userID uint) ([]dto.GroupDTO, error) {
+	key := KeyGroupsMine(userID)
+	if s.cache != nil {
+		var cached []dto.GroupDTO
+		if s.cache.GetJSON(key, &cached) {
+			return cached, nil
+		}
+	}
 	var memberships []model.GroupMember
 	if err := s.db.Where("user_id = ?", userID).Find(&memberships).Error; err != nil {
 		return nil, err
 	}
 	if len(memberships) == 0 {
-		return []dto.GroupDTO{}, nil
+		out := []dto.GroupDTO{}
+		if s.cache != nil {
+			s.cache.SetJSON(key, out)
+		}
+		return out, nil
 	}
 	ids := make([]string, 0, len(memberships))
 	roleBy := make(map[string]string, len(memberships))
@@ -308,6 +379,9 @@ func (s *GroupService) ListMine(userID uint) ([]dto.GroupDTO, error) {
 			role = model.GroupRoleMember
 		}
 		out = append(out, *s.toDTO(g, role, s.memberCount(g.ID)))
+	}
+	if s.cache != nil {
+		s.cache.SetJSON(key, out)
 	}
 	return out, nil
 }
@@ -334,6 +408,7 @@ func (s *GroupService) MemberUserIDs(groupID string) []string {
 
 // ListMembers returns the full durable roster with username, role, and online flag.
 // isOnline may be nil (all offline). Sorted: owner first, then online, then username.
+// Roster is Redis-cached; online flags are always refreshed on read.
 func (s *GroupService) ListMembers(groupID string, isOnline func(userID string) bool) ([]dto.GroupMemberDTO, error) {
 	groupID = strings.TrimSpace(groupID)
 	if groupID == "" {
@@ -343,12 +418,37 @@ func (s *GroupService) ListMembers(groupID string, isOnline func(userID string) 
 		return nil, errors.New("group not found")
 	}
 
+	key := KeyGroupMembers(groupID)
+	if s.cache != nil {
+		var cached []dto.GroupMemberDTO
+		if s.cache.GetJSON(key, &cached) {
+			for i := range cached {
+				if isOnline != nil {
+					cached[i].Online = isOnline(cached[i].UserID)
+				} else if s.hub != nil {
+					cached[i].Online = s.hub.IsUserOnline(cached[i].UserID)
+				} else {
+					cached[i].Online = false
+				}
+			}
+			// Re-apply sort with live online (owner first, online, username).
+			sort.SliceStable(cached, func(i, j int) bool {
+				return memberSortLess(cached[i], cached[j])
+			})
+			return cached, nil
+		}
+	}
+
 	var rows []model.GroupMember
 	if err := s.db.Where("group_id = ?", groupID).Order("id asc").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	if len(rows) == 0 {
-		return []dto.GroupMemberDTO{}, nil
+		out := []dto.GroupMemberDTO{}
+		if s.cache != nil {
+			s.cache.SetJSON(key, out)
+		}
+		return out, nil
 	}
 
 	ids := make([]uint, 0, len(rows))
@@ -387,7 +487,17 @@ func (s *GroupService) ListMembers(groupID string, isOnline func(userID string) 
 		})
 	}
 
-	// owner → admin → member; online first within band.
+	sort.SliceStable(out, func(i, j int) bool {
+		return memberSortLess(out[i], out[j])
+	})
+	if s.cache != nil {
+		s.cache.SetJSON(key, out)
+	}
+	return out, nil
+}
+
+// memberSortLess: owner → admin → member; online first within band; then username.
+func memberSortLess(a, b dto.GroupMemberDTO) bool {
 	roleRank := func(role string) int {
 		switch role {
 		case model.GroupRoleOwner:
@@ -398,17 +508,13 @@ func (s *GroupService) ListMembers(groupID string, isOnline func(userID string) 
 			return 2
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		ri, rj := out[i], out[j]
-		if roleRank(ri.Role) != roleRank(rj.Role) {
-			return roleRank(ri.Role) < roleRank(rj.Role)
-		}
-		if ri.Online != rj.Online {
-			return ri.Online
-		}
-		return strings.ToLower(ri.Username) < strings.ToLower(rj.Username)
-	})
-	return out, nil
+	if roleRank(a.Role) != roleRank(b.Role) {
+		return roleRank(a.Role) < roleRank(b.Role)
+	}
+	if a.Online != b.Online {
+		return a.Online
+	}
+	return strings.ToLower(a.Username) < strings.ToLower(b.Username)
 }
 
 // Exists reports whether a group row is present.
@@ -510,6 +616,11 @@ func (s *GroupService) UpdateName(actorID uint, groupID, name string) (*dto.Grou
 	}
 	g.Name = name
 	role := s.MemberRole(actorID, groupID)
+	// Name appears on each member's "my groups" list.
+	s.invalidateGroupMembers(groupID)
+	for _, uid := range s.memberUIDs(groupID) {
+		s.invalidateGroupsMine(uid)
+	}
 	return s.toDTO(&g, role, s.memberCount(groupID)), nil
 }
 
@@ -536,6 +647,9 @@ func (s *GroupService) SetAvatar(actorID uint, groupID, publicPath string) (*dto
 	g.Avatar = publicPath
 	g.AvatarRev = rev
 	role := s.MemberRole(actorID, groupID)
+	for _, uid := range s.memberUIDs(groupID) {
+		s.invalidateGroupsMine(uid)
+	}
 	return s.toDTO(&g, role, s.memberCount(groupID)), nil
 }
 
@@ -571,6 +685,8 @@ func (s *GroupService) SetMemberRole(actorID uint, groupID string, targetUserID 
 		return nil, err
 	}
 	m.Role = targetRole
+	s.invalidateGroupMembers(groupID)
+	s.invalidateGroupsMine(actorID, targetUserID)
 	var u model.User
 	_ = s.db.First(&u, targetUserID).Error
 	name := u.Username
@@ -593,6 +709,13 @@ func (s *GroupService) ListAnnouncements(groupID string) ([]dto.GroupAnnouncemen
 	if err != nil {
 		return nil, err
 	}
+	key := KeyGroupAnnouncements(groupID)
+	if s.cache != nil {
+		var cached []dto.GroupAnnouncementDTO
+		if s.cache.GetJSON(key, &cached) {
+			return cached, nil
+		}
+	}
 	var rows []model.GroupAnnouncement
 	if err := s.db.Where("group_id = ?", groupID).Order("created_at desc").Find(&rows).Error; err != nil {
 		return nil, err
@@ -601,7 +724,23 @@ func (s *GroupService) ListAnnouncements(groupID string) ([]dto.GroupAnnouncemen
 	for _, r := range rows {
 		out = append(out, toAnnouncementDTO(r))
 	}
+	if s.cache != nil {
+		s.cache.SetJSON(key, out)
+	}
 	return out, nil
+}
+
+// memberUIDs returns durable member ids (for cache invalidation).
+func (s *GroupService) memberUIDs(groupID string) []uint {
+	var rows []model.GroupMember
+	if err := s.db.Select("user_id").Where("group_id = ?", groupID).Find(&rows).Error; err != nil {
+		return nil
+	}
+	out := make([]uint, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.UserID)
+	}
+	return out
 }
 
 // AddAnnouncements pins one or more messages as group announcements (owner/admin).
@@ -681,6 +820,7 @@ func (s *GroupService) AddAnnouncements(actorID uint, groupID string, items []dt
 	if len(out) == 0 {
 		return nil, errors.New("failed to pin any announcement")
 	}
+	s.invalidateGroupAnnouncements(groupID)
 	return out, nil
 }
 
@@ -704,6 +844,7 @@ func (s *GroupService) RemoveAnnouncement(actorID uint, groupID, messageID strin
 	if res.RowsAffected == 0 {
 		return errors.New("announcement not found")
 	}
+	s.invalidateGroupAnnouncements(groupID)
 	return nil
 }
 

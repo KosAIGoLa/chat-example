@@ -21,7 +21,15 @@ import (
 
 // Run boots dependencies, serves HTTP, and shuts down on SIGINT/SIGTERM.
 func Run(cfg Config) error {
-	db := database.Init()
+	db := database.InitWithConfig(
+		cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName,
+		database.PoolConfig{
+			MaxOpenConns:    cfg.DBPool.MaxOpenConns,
+			MaxIdleConns:    cfg.DBPool.MaxIdleConns,
+			ConnMaxLifetime: cfg.DBPool.ConnMaxLifetime,
+			ConnMaxIdleTime: cfg.DBPool.ConnMaxIdleTime,
+		},
+	)
 
 	authSvc := service.NewAuthService(db, cfg.JWTSecret)
 	authCtrl := controller.NewAuthController(authSvc)
@@ -44,13 +52,36 @@ func Run(cfg Config) error {
 	}
 	msgCrypto := service.NewMsgCrypto(cfg.MsgCryptoKey)
 
+	// Redis list cache (optional: empty REDIS_ADDR disables).
+	redisPool := service.RedisPoolOptions{
+		PoolSize:        cfg.RedisPool.PoolSize,
+		MinIdleConns:    cfg.RedisPool.MinIdleConns,
+		MaxIdleConns:    cfg.RedisPool.MaxIdleConns,
+		PoolTimeout:     cfg.RedisPool.PoolTimeout,
+		ConnMaxIdleTime: cfg.RedisPool.ConnMaxIdleTime,
+		ConnMaxLifetime: cfg.RedisPool.ConnMaxLifetime,
+		DialTimeout:     cfg.RedisPool.DialTimeout,
+		ReadTimeout:     cfg.RedisPool.ReadTimeout,
+		WriteTimeout:    cfg.RedisPool.WriteTimeout,
+	}
+	listCache, err := service.NewListCacheWithPool(
+		cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB, cfg.RedisTTL, redisPool,
+	)
+	if err != nil {
+		// Soft-fail: continue without cache so a temporary Redis outage does not block boot.
+		log.Printf("[Cache] redis unavailable (%v) — lists will hit DB only", err)
+		listCache, _ = service.NewListCache("", "", 0, cfg.RedisTTL)
+	}
+
 	msgStore := service.NewMessageStore(db)
 	friendSvc := service.NewFriendService(db, hub)
 	friendSvc.SetOffline(offlineSvc)
 	friendSvc.SetNATS(natsSvc)
 	friendSvc.SetMessageStore(msgStore)
+	friendSvc.SetCache(listCache)
 
 	groupSvc := service.NewGroupService(db, hub)
+	groupSvc.SetCache(listCache)
 
 	chatSvc := service.NewChatService(hub, natsSvc, msgCrypto)
 	chatSvc.SetMessageStore(msgStore)
@@ -69,12 +100,13 @@ func Run(cfg Config) error {
 
 	lkSvc := service.NewLiveKitService()
 	meetingSvc := service.NewMeetingService()
+	chatSvc.SetMeetings(meetingSvc)
 	livekitCtrl := controller.NewLiveKitController(lkSvc, hub, friendSvc, groupSvc, meetingSvc)
 	livekitCtrl.SetChat(chatSvc)
 
 	mediaSvc, err := service.NewMediaService(cfg.MediaDir)
 	if err != nil {
-		natsSvc.Close()
+		cleanup(hub, natsSvc, db, listCache)
 		return fmt.Errorf("media: %w", err)
 	}
 	mediaCtrl := controller.NewMediaController(mediaSvc)
@@ -94,9 +126,13 @@ func Run(cfg Config) error {
 
 	errCh := make(chan error, 1)
 	go func() {
+		cacheStatus := "off"
+		if listCache != nil && listCache.Enabled() {
+			cacheStatus = cfg.RedisAddr
+		}
 		log.Printf(
-			"Server starting on %s (NATS: %s, media: %s, shutdown-timeout: %s, msg-crypto: AES-GCM, livekit: %s)",
-			cfg.Addr, cfg.NATSURL, cfg.MediaDir, cfg.ShutdownTimeout, lkSvc.URL(),
+			"Server starting on %s (NATS: %s, redis: %s, media: %s, shutdown-timeout: %s, msg-crypto: AES-GCM, livekit: %s)",
+			cfg.Addr, cfg.NATSURL, cacheStatus, cfg.MediaDir, cfg.ShutdownTimeout, lkSvc.URL(),
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -110,10 +146,10 @@ func Run(cfg Config) error {
 	select {
 	case err := <-errCh:
 		if err != nil {
-			cleanup(hub, natsSvc, db)
+			cleanup(hub, natsSvc, db, listCache)
 			return fmt.Errorf("http: %w", err)
 		}
-		cleanup(hub, natsSvc, db)
+		cleanup(hub, natsSvc, db, listCache)
 		return nil
 	case sig := <-sigCh:
 		log.Printf("[Shutdown] signal %v — graceful stop (timeout %s)", sig, cfg.ShutdownTimeout)
@@ -132,18 +168,21 @@ func Run(cfg Config) error {
 		_ = srv.Close()
 	}
 
-	cleanup(hub, natsSvc, db)
+	cleanup(hub, natsSvc, db, listCache)
 	log.Printf("[Shutdown] complete")
 	return nil
 }
 
-func cleanup(hub *service.Hub, natsSvc *service.NATSService, db *gorm.DB) {
+func cleanup(hub *service.Hub, natsSvc *service.NATSService, db *gorm.DB, cache *service.ListCache) {
 	// Idempotent: hub.Close may already have run.
 	if hub != nil {
 		hub.Close()
 	}
 	if natsSvc != nil {
 		natsSvc.Close()
+	}
+	if cache != nil {
+		cache.Close()
 	}
 	if db != nil {
 		if sqlDB, err := db.DB(); err == nil && sqlDB != nil {

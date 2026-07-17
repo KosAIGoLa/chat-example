@@ -123,7 +123,7 @@ docker compose up -d --build
 
 | Service | Role |
 |---------|------|
-| `nats` | JetStream + monitoring `:8222` |
+| `nats` | JetStream (`nats.conf`) + monitoring `:8222` |
 | `postgres` | Durable app data |
 | `livekit` | SFU; set `LIVEKIT_NODE_IP` for LAN ICE |
 | `ws-server` | Go API + WS |

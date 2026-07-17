@@ -13,12 +13,13 @@ import (
 
 // ChatService contains the business logic for chat operations.
 type ChatService struct {
-	hub     *Hub
-	nats    *NATSService
-	crypto  *MsgCrypto
-	store   *MessageStore
-	friends *FriendService
-	groups  *GroupService
+	hub      *Hub
+	nats     *NATSService
+	crypto   *MsgCrypto
+	store    *MessageStore
+	friends  *FriendService
+	groups   *GroupService
+	meetings *MeetingService
 }
 
 // NewChatService creates a new ChatService.
@@ -42,6 +43,11 @@ func (s *ChatService) SetFriends(f *FriendService) {
 // SetGroups attaches durable group membership service.
 func (s *ChatService) SetGroups(g *GroupService) {
 	s.groups = g
+}
+
+// SetMeetings attaches in-memory group meeting registry (snapshot on join).
+func (s *ChatService) SetMeetings(m *MeetingService) {
+	s.meetings = m
 }
 
 // Groups returns the durable group service (may be nil).
@@ -539,6 +545,40 @@ func (s *ChatService) joinGroup(client *model.Client, msg *dto.ChatMessageDTO) {
 	log.Printf("[Chat] user %s joined group %s (new=%v rejoin=%v)", client.UserID, groupID, isNew, rejoin)
 	if isNew && !rejoin {
 		s.broadcastSystemGroupNotice(client, groupID, "join")
+	}
+	// Catch-up: if a meeting is already open, push snapshot to this connection only
+	// (so clients need not poll GET /api/livekit/meeting).
+	s.pushMeetingSnapshot(client, groupID)
+}
+
+// pushMeetingSnapshot delivers current open-meeting state to one client (best-effort).
+func (s *ChatService) pushMeetingSnapshot(client *model.Client, groupID string) {
+	if s == nil || s.meetings == nil || client == nil || groupID == "" {
+		return
+	}
+	m := s.meetings.Get(groupID)
+	if m == nil {
+		return
+	}
+	ev := dto.MeetingEvent{
+		Type:             "meeting",
+		Action:           "snapshot",
+		Room:             m.Room,
+		Media:            m.Media,
+		From:             m.StartedBy,
+		FromName:         m.StartedByName,
+		GroupID:          groupID,
+		ParticipantCount: m.ParticipantCount,
+		Timestamp:        m.StartedAt,
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	select {
+	case client.Send <- data:
+	default:
+		log.Printf("[Chat] client %s buffer full while sending meeting snapshot", client.UserID)
 	}
 }
 

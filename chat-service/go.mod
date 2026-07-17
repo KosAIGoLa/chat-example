@@ -8,6 +8,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/livekit/protocol v1.36.1
 	github.com/nats-io/nats.go v1.52.0
+	github.com/redis/go-redis/v9 v9.7.3
 	golang.org/x/crypto v0.49.0
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gorm v1.31.2
@@ -77,7 +78,6 @@ require (
 	github.com/pion/turn/v4 v4.0.0 // indirect
 	github.com/pion/webrtc/v4 v4.0.8 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.0 // indirect
-	github.com/redis/go-redis/v9 v9.7.0 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
 	github.com/stoewer/go-strcase v1.3.0 // indirect
 	github.com/twitchtv/twirp v8.1.3+incompatible // indirect

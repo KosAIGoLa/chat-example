@@ -236,7 +236,7 @@ func (ctrl *ChatController) GetGroupMembers(c *gin.Context) {
 		onlineSet[uid] = true
 	}
 	if ctrl.natsSvc != nil {
-		if remote, err := ctrl.natsSvc.GetRemoteOnlineUsers(45 * time.Second); err == nil {
+		if remote, err := ctrl.natsSvc.GetRemoteOnlineUsers(90 * time.Second); err == nil {
 			for _, u := range remote {
 				if u.UserID != "" {
 					onlineSet[u.UserID] = true
@@ -292,16 +292,18 @@ func (ctrl *ChatController) GetOnlineUsers(c *gin.Context) {
 	}
 
 	// Merge only remote-instance presence; never re-add local KV leftovers.
-	// maxAge 45s matches presence heartbeat (30s) + small slack.
-	if remote, err := ctrl.natsSvc.GetRemoteOnlineUsers(45 * time.Second); err == nil {
-		for _, u := range remote {
-			if u.UserID == me {
-				continue
+	// maxAge 90s: hub heartbeat 30s + KV TTL 90s — avoid flapping offline on brief stalls.
+	if ctrl.natsSvc != nil {
+		if remote, err := ctrl.natsSvc.GetRemoteOnlineUsers(90 * time.Second); err == nil {
+			for _, u := range remote {
+				if u.UserID == me {
+					continue
+				}
+				if _, exists := byID[u.UserID]; exists {
+					continue
+				}
+				byID[u.UserID] = u
 			}
-			if _, exists := byID[u.UserID]; exists {
-				continue
-			}
-			byID[u.UserID] = u
 		}
 	}
 

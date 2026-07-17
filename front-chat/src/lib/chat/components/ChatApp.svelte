@@ -69,7 +69,7 @@
 	let inputText = $state('');
 	let callBusy = $state(false);
 
-	// After leaving a group meeting, refresh open-meeting banner for this group.
+	// After leaving a group meeting, refresh banner (event-driven; not a clock).
 	let prevCallPhase = $state(call.phase);
 	$effect(() => {
 		const phase = call.phase;
@@ -78,22 +78,33 @@
 		if (
 			(prev === 'connected' || prev === 'connecting') &&
 			(phase === 'idle' || phase === 'ended') &&
-			groupId.trim()
+			groupId.trim() &&
+			chat.chatMode === 'group'
 		) {
 			void chat.refreshGroupMeeting(groupId.trim());
 		}
 	});
 
-	// Poll open meeting while viewing a group so "加入会议" appears even if WS was missed.
+	/**
+	 * Meeting state: WebSocket `meeting` events are primary.
+	 * Keypoint GET only (no 4s poll):
+	 *  - selectGroup / joinGroup (conversation-nav)
+	 *  - WS reconnect (onSocketReady)
+	 *  - tab becomes visible again
+	 * Server also pushes `action: snapshot` on join_group when a meeting is open.
+	 */
 	$effect(() => {
 		const gid = groupId.trim();
 		const mode = chat.chatMode;
 		if (mode !== 'group' || !gid) return;
-		void chat.refreshGroupMeeting(gid);
-		const t = setInterval(() => {
-			void chat.refreshGroupMeeting(gid);
-		}, 4000);
-		return () => clearInterval(t);
+
+		const onVisible = () => {
+			if (document.visibilityState === 'visible') {
+				void chat.refreshGroupMeeting(gid);
+			}
+		};
+		document.addEventListener('visibilitychange', onVisible);
+		return () => document.removeEventListener('visibilitychange', onVisible);
 	});
 
 	const privatePeer = $derived.by(() => {

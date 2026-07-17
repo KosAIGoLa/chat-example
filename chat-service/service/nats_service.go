@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -64,7 +66,12 @@ func NewNATSService(url string, hub *Hub) (*NATSService, error) {
 
 	// Ensure the CHAT_MESSAGES stream exists for durable message storage.
 	// Retain several months so clients can scroll up for older history.
+	//
+	// MaxBytes must fit under JetStream server max_file_store (Docker often
+	// auto-caps ~0.5–2 GiB from free disk). Oversized MaxBytes causes:
+	//   "insufficient storage resources available" → ws-server crash-loop → nginx 502.
 	const chatHistoryRetention = 180 * 24 * time.Hour // 6 months
+	maxBytes := jetStreamMaxBytes()
 	streamCfg := &nats.StreamConfig{
 		Name:      streamName,
 		Subjects:  []string{streamSubjects},
@@ -72,28 +79,22 @@ func NewNATSService(url string, hub *Hub) (*NATSService, error) {
 		Retention: nats.LimitsPolicy,
 		MaxAge:    chatHistoryRetention,
 		MaxMsgs:   5_000_000,
-		MaxBytes:  8 * 1024 * 1024 * 1024, // 8 GiB soft cap
+		MaxBytes:  maxBytes,
 	}
-	_, err = js.AddStream(streamCfg)
-	if err != nil {
-		// Stream may already exist — try updating retention / limits.
-		_, uerr := js.UpdateStream(streamCfg)
-		if uerr != nil {
-			return nil, fmt.Errorf("jetstream add/update stream: %w (update: %v)", err, uerr)
-		}
+	if err := ensureChatStream(js, streamCfg); err != nil {
+		return nil, err
 	}
 
 	// --- KV: presence management ---
-	// Short TTL so crash leftovers disappear quickly; hub heartbeat refreshes every 30s.
-	// 45s TTL: offline without clean Unregister cannot stay "online" longer than this.
+	// TTL > hub heartbeat (30s) so brief stalls do not drop keys. Unregister still Purges immediately.
+	// Note: existing bucket TTL cannot be changed without delete+recreate.
 	kv, err := js.CreateKeyValue(&nats.KeyValueConfig{
 		Bucket:      kvBucket,
 		Description: "user presence status",
-		TTL:         45 * time.Second,
+		TTL:         90 * time.Second,
 	})
 	if err != nil {
 		// Bucket may already exist — try fetching it.
-		// Note: existing bucket TTL cannot be changed without recreate.
 		kv, err = js.KeyValue(kvBucket)
 		if err != nil {
 			return nil, fmt.Errorf("kv create/get bucket: %w", err)
@@ -130,9 +131,102 @@ func NewNATSService(url string, hub *Hub) (*NATSService, error) {
 		return nil, fmt.Errorf("nats subscribe rpc: %w", err)
 	}
 
-	log.Printf("[NATS] connected (instance=%s) — Core NATS pub/sub, JetStream stream=%s, KV bucket=%s, RPC on %s",
-		instanceID, streamName, kvBucket, rpcSubject)
+	log.Printf("[NATS] connected (instance=%s) — Core NATS pub/sub, JetStream stream=%s max_bytes=%d, KV bucket=%s, RPC on %s",
+		instanceID, streamName, maxBytes, kvBucket, rpcSubject)
 	return ns, nil
+}
+
+// jetStreamMaxBytes returns CHAT_MESSAGES MaxBytes (default 1 GiB).
+// Must stay ≤ nats.conf jetstream.max_file_store (compose default 2GB).
+// Override with NATS_STREAM_MAX_BYTES (bytes, or suffix K/M/G).
+func jetStreamMaxBytes() int64 {
+	const def = int64(1024 * 1024 * 1024) // 1 GiB
+	v := os.Getenv("NATS_STREAM_MAX_BYTES")
+	if v == "" {
+		return def
+	}
+	if n, err := parseByteSize(v); err == nil && n > 0 {
+		return n
+	}
+	log.Printf("[NATS] invalid NATS_STREAM_MAX_BYTES=%q — using %d", v, def)
+	return def
+}
+
+func parseByteSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, errors.New("empty")
+	}
+	mult := int64(1)
+	switch {
+	case strings.HasSuffix(strings.ToUpper(s), "G"):
+		mult = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(strings.ToUpper(s), "M"):
+		mult = 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(strings.ToUpper(s), "K"):
+		mult = 1024
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	if n <= 0 {
+		return 0, errors.New("non-positive")
+	}
+	return n * mult, nil
+}
+
+// ensureChatStream creates or updates CHAT_MESSAGES; on storage errors retries with smaller MaxBytes.
+func ensureChatStream(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
+	try := func(c *nats.StreamConfig) error {
+		_, err := js.AddStream(c)
+		if err == nil {
+			return nil
+		}
+		_, uerr := js.UpdateStream(c)
+		if uerr == nil {
+			return nil
+		}
+		return fmt.Errorf("add: %w; update: %v", err, uerr)
+	}
+
+	if err := try(cfg); err == nil {
+		return nil
+	} else {
+		log.Printf("[NATS] stream ensure with MaxBytes=%d failed: %v — retrying smaller caps", cfg.MaxBytes, err)
+	}
+
+	// Existing stream may have reserved more than the server allows; step down MaxBytes.
+	candidates := []int64{
+		cfg.MaxBytes,
+		256 * 1024 * 1024,
+		128 * 1024 * 1024,
+		64 * 1024 * 1024,
+	}
+	seen := map[int64]bool{}
+	for _, mb := range candidates {
+		if mb <= 0 || seen[mb] {
+			continue
+		}
+		seen[mb] = true
+		c := *cfg
+		c.MaxBytes = mb
+		if err := try(&c); err == nil {
+			log.Printf("[NATS] stream %s ready MaxBytes=%d", streamName, mb)
+			return nil
+		}
+	}
+
+	// Last resort: stream already exists with usable data — continue without changing limits.
+	if info, err := js.StreamInfo(streamName); err == nil && info != nil {
+		log.Printf("[NATS] WARNING: could not update stream limits; using existing stream (msgs=%d bytes=%d max_bytes=%d)",
+			info.State.Msgs, info.State.Bytes, info.Config.MaxBytes)
+		return nil
+	}
+	return fmt.Errorf("jetstream ensure stream %s: insufficient storage (set NATS_STREAM_MAX_BYTES lower or free disk)", streamName)
 }
 
 // PublishPrivate publishes a private message to subject chat.private.<to>.
@@ -374,6 +468,28 @@ func (ns *NATSService) GetOnlineUserIDs() ([]string, error) {
 		ids = append(ids, u.UserID)
 	}
 	return ids, nil
+}
+
+// IsPresentOnline reports whether userID has a fresh online mark in KV on another instance.
+// Same-instance KV is ignored (local Hub is authoritative after disconnect races).
+func (ns *NATSService) IsPresentOnline(userID string, maxAge time.Duration) bool {
+	if ns == nil || ns.kv == nil || userID == "" {
+		return false
+	}
+	if maxAge <= 0 {
+		maxAge = 90 * time.Second
+	}
+	p, err := ns.GetPresence(userID)
+	if err != nil || p == nil || !p.Online {
+		return false
+	}
+	if p.Instance != "" && p.Instance == ns.instanceID {
+		return false
+	}
+	if p.LastSeen > 0 && time.Now().Unix()-p.LastSeen > int64(maxAge.Seconds()) {
+		return false
+	}
+	return true
 }
 
 // GetFreshOnlineUsers returns presence entries that are online and recently heartbeated.

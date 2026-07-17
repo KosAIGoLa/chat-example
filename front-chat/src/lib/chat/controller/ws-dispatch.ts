@@ -144,9 +144,9 @@ export function createWsDispatcher(deps: WsDispatchDeps) {
 			return;
 		}
 		if (msg.type === 'presence' && 'user_id' in msg) {
+			// Apply in-place — do NOT full-refresh friends/online lists here.
+			// Concurrent refreshFriends() races with applyPresence and can wipe online flags.
 			deps.applyPresence(msg as unknown as PresenceEvent);
-			void deps.refreshFriends();
-			void deps.refreshOnlineUsers();
 			return;
 		}
 		if (msg.type === 'group_announcement' && 'group_id' in msg) {

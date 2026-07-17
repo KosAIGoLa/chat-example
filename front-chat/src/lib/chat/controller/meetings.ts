@@ -24,7 +24,12 @@ export function createMeetingsApi(deps: MeetingsDeps) {
 			deps.setActiveMeetings(next);
 			return;
 		}
-		if (ev.action === 'started' || ev.action === 'joined' || ev.action === 'left') {
+		if (
+			ev.action === 'started' ||
+			ev.action === 'joined' ||
+			ev.action === 'left' ||
+			ev.action === 'snapshot'
+		) {
 			const media: 'audio' | 'video' = ev.media === 'video' ? 'video' : 'audio';
 			const prev = activeMeetings[gid];
 			deps.setActiveMeetings({
@@ -42,6 +47,7 @@ export function createMeetingsApi(deps: MeetingsDeps) {
 							: (prev?.participant_count ?? 1)
 				}
 			});
+			// snapshot = silent catch-up (join_group / reconnect); do not toast.
 			if (ev.action === 'started' && ev.from !== deps.getMyUserId()) {
 				const gname = deps.groupDisplayName(gid);
 				const kind = media === 'video' ? '视讯' : '语音';
@@ -53,9 +59,22 @@ export function createMeetingsApi(deps: MeetingsDeps) {
 		}
 	}
 
+	/** In-flight de-dupe so selectGroup + reconnect + visibility don't stampede. */
+	const inflight = new Map<string, Promise<void>>();
+
 	async function refreshGroupMeeting(gid: string) {
 		const id = (gid || '').trim();
 		if (!id) return;
+		const existing = inflight.get(id);
+		if (existing) return existing;
+		const p = refreshGroupMeetingInner(id).finally(() => {
+			if (inflight.get(id) === p) inflight.delete(id);
+		});
+		inflight.set(id, p);
+		return p;
+	}
+
+	async function refreshGroupMeetingInner(id: string) {
 		try {
 			const st = await livekitService.getMeeting(id);
 			const activeMeetings = deps.getActiveMeetings();
@@ -79,7 +98,7 @@ export function createMeetingsApi(deps: MeetingsDeps) {
 			};
 			deps.setActiveMeetings({ ...activeMeetings, [id]: snapshot });
 		} catch {
-			// ignore
+			// ignore network / 401 — WS snapshot or next keypoint will retry
 		}
 	}
 

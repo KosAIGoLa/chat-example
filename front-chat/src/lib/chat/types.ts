@@ -206,7 +206,8 @@ export interface CallEvent {
  */
 export interface MeetingEvent {
 	type: 'meeting';
-	action: 'started' | 'ended' | 'joined' | 'left' | string;
+	/** started | ended | joined | left | snapshot (catch-up, no toast) */
+	action: 'started' | 'ended' | 'joined' | 'left' | 'snapshot' | string;
 	room: string;
 	media?: CallMedia | string;
 	from: string;
