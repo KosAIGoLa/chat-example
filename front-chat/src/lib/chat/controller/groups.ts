@@ -2,7 +2,7 @@
  * Durable groups: create/join/leave, meta, members, announcements, roles.
  */
 
-import { groupService } from '$lib/api';
+import { friendService, groupService } from '$lib/api';
 import type {
 	ChatMessage,
 	GroupAnnouncement,
@@ -16,12 +16,14 @@ export interface GroupsDeps {
 	getMyUserId: () => string;
 	getGroupId: () => string;
 	setGroupId: (v: string) => void;
+	getTargetUser: () => string;
 	getJoinedGroups: () => string[];
 	setJoinedGroups: (g: string[]) => void;
 	getGroupMeta: () => Record<string, GroupInfo>;
 	setGroupMeta: (m: Record<string, GroupInfo>) => void;
 	getGroupMembers: () => GroupMember[];
 	setGroupMembers: (m: GroupMember[]) => void;
+	/** Active conversation pins (group or private). */
 	getGroupAnnouncements: () => GroupAnnouncement[];
 	setGroupAnnouncements: (a: GroupAnnouncement[]) => void;
 	getSelectMode: () => boolean;
@@ -71,15 +73,44 @@ export function createGroupsApi(deps: GroupsDeps) {
 		}
 	}
 
-	async function refreshAnnouncements(g?: string) {
-		const gid = (g ?? deps.getGroupId()).trim();
+	/** Refresh pins for active conversation (group announcements or private pins). */
+	async function refreshAnnouncements(scopeId?: string) {
+		const mode = deps.getChatMode();
+		if (mode === 'private') {
+			const peer = (scopeId ?? deps.getTargetUser()).trim();
+			if (!peer) {
+				deps.setGroupAnnouncements([]);
+				return;
+			}
+			try {
+				const res = await friendService.listPins(peer);
+				if (deps.getChatMode() !== 'private' || deps.getTargetUser().trim() !== peer) return;
+				const pins = (res.pins ?? []).map((p) => ({
+					id: p.id,
+					peer_id: p.peer_id || peer,
+					message_id: p.message_id,
+					content: p.content,
+					content_type: p.content_type,
+					from_user_id: p.from_user_id,
+					from_username: p.from_username,
+					set_by_user_id: p.set_by_user_id,
+					message_ts: p.message_ts,
+					created_at: p.created_at
+				})) satisfies GroupAnnouncement[];
+				deps.setGroupAnnouncements(pins);
+			} catch {
+				// ignore (e.g. not friends)
+			}
+			return;
+		}
+		const gid = (scopeId ?? deps.getGroupId()).trim();
 		if (!gid) {
 			deps.setGroupAnnouncements([]);
 			return;
 		}
 		try {
 			const res = await groupService.listAnnouncements(gid);
-			if (deps.getGroupId().trim() !== gid) return;
+			if (deps.getChatMode() !== 'group' || deps.getGroupId().trim() !== gid) return;
 			deps.setGroupAnnouncements(res.announcements ?? []);
 		} catch {
 			// ignore
@@ -192,7 +223,10 @@ export function createGroupsApi(deps: GroupsDeps) {
 	}
 
 	function enterSelectMode(seedId?: string) {
-		if (deps.getChatMode() !== 'group') return;
+		const mode = deps.getChatMode();
+		if (mode !== 'group' && mode !== 'private') return;
+		if (mode === 'group' && !deps.getGroupId().trim()) return;
+		if (mode === 'private' && !deps.getTargetUser().trim()) return;
 		deps.setSelectMode(true);
 		deps.setSelectedMsgIds(seedId ? [seedId] : []);
 	}
@@ -218,15 +252,11 @@ export function createGroupsApi(deps: GroupsDeps) {
 		}
 	}
 
-	async function setMessagesAsAnnouncement(msgIds?: string[]) {
-		const gid = deps.getGroupId().trim();
-		if (deps.getChatMode() !== 'group' || !gid) throw new Error('请先选择群聊');
-		const ids = (msgIds?.length ? msgIds : deps.getSelectedMsgIds()).filter(Boolean);
-		if (!ids.length) throw new Error('请先选择消息');
+	function buildPinItems(ids: string[]) {
 		const byId = new Map(
 			deps.getMessages().filter((m) => m.id).map((m) => [m.id as string, m])
 		);
-		const items = ids.map((id) => {
+		return ids.map((id) => {
 			const m = byId.get(id);
 			const content =
 				m?.content_type === 'voice'
@@ -243,21 +273,65 @@ export function createGroupsApi(deps: GroupsDeps) {
 				message_ts: m?.timestamp
 			};
 		});
-		const res = await groupService.addAnnouncements(gid, { items });
-		const added = res.announcements ?? [];
+	}
+
+	function mergePins(added: GroupAnnouncement[]) {
 		const map = new Map(deps.getGroupAnnouncements().map((a) => [a.message_id, a]));
 		for (const a of added) map.set(a.message_id, a);
 		deps.setGroupAnnouncements(
 			Array.from(map.values()).sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
 		);
+	}
+
+	/** Pin messages in active group or private chat (append; multiple allowed). */
+	async function setMessagesAsAnnouncement(msgIds?: string[]): Promise<GroupAnnouncement[]> {
+		const mode = deps.getChatMode();
+		const ids = (msgIds?.length ? msgIds : deps.getSelectedMsgIds()).filter(Boolean);
+		if (!ids.length) throw new Error('请先选择消息');
+		const items = buildPinItems(ids);
+
+		if (mode === 'private') {
+			const peer = deps.getTargetUser().trim();
+			if (!peer) throw new Error('请先选择私聊');
+			const res = await friendService.addPins(peer, { items });
+			const added = (res.pins ?? []).map((p) => ({
+				id: p.id,
+				peer_id: p.peer_id || peer,
+				message_id: p.message_id,
+				content: p.content,
+				content_type: p.content_type,
+				from_user_id: p.from_user_id,
+				from_username: p.from_username,
+				set_by_user_id: p.set_by_user_id,
+				message_ts: p.message_ts,
+				created_at: p.created_at
+			})) satisfies GroupAnnouncement[];
+			mergePins(added);
+			exitSelectMode();
+			return added;
+		}
+
+		const gid = deps.getGroupId().trim();
+		if (mode !== 'group' || !gid) throw new Error('请先选择会话');
+		const res = await groupService.addAnnouncements(gid, { items });
+		const added = res.announcements ?? [];
+		mergePins(added);
 		exitSelectMode();
 		return added;
 	}
 
 	async function removeAnnouncement(messageId: string) {
-		const gid = deps.getGroupId().trim();
-		if (!gid || !messageId) return;
-		await groupService.removeAnnouncement(gid, messageId);
+		if (!messageId) return;
+		const mode = deps.getChatMode();
+		if (mode === 'private') {
+			const peer = deps.getTargetUser().trim();
+			if (!peer) return;
+			await friendService.removePin(peer, messageId);
+		} else {
+			const gid = deps.getGroupId().trim();
+			if (!gid) return;
+			await groupService.removeAnnouncement(gid, messageId);
+		}
 		deps.setGroupAnnouncements(
 			deps.getGroupAnnouncements().filter((a) => a.message_id !== messageId)
 		);

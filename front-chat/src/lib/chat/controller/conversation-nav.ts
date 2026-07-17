@@ -80,6 +80,9 @@ export function createConversationNav(deps: {
 		void w.reloadActiveHistory();
 		if (s.chatMode === 'group' && s.groupId.trim()) {
 			void w.refreshGroupMembers(s.groupId.trim());
+			void w.refreshAnnouncements(s.groupId.trim());
+		} else if (s.chatMode === 'private' && s.targetUser.trim()) {
+			void w.refreshAnnouncements(s.targetUser.trim());
 		}
 		void w.flushPendingSends();
 	}
@@ -145,7 +148,12 @@ export function createConversationNav(deps: {
 		if (!peer || peer === myUserId) return;
 
 		w.notifyTypingStop();
-		s.replyTarget = null;
+		if (s.targetUser !== peer || s.chatMode !== 'private') {
+			s.replyTarget = null;
+			s.selectMode = false;
+			s.selectedMsgIds = [];
+			s.groupAnnouncements = [];
+		}
 		s.chatMode = 'private';
 		s.targetUser = peer;
 		w.clearUnread(peer);
@@ -156,7 +164,7 @@ export function createConversationNav(deps: {
 		}
 		w.ensurePeerListed(peer, username);
 
-		await w.loadPrivateHistory(peer);
+		await Promise.all([w.loadPrivateHistory(peer), w.refreshAnnouncements(peer)]);
 		w.clearUnread(peer);
 	}
 
@@ -222,7 +230,11 @@ export function createConversationNav(deps: {
 			void w.refreshAnnouncements(s.groupId.trim());
 		} else if (mode === 'private') {
 			s.groupMembers = [];
-			s.groupAnnouncements = [];
+			if (s.targetUser.trim()) {
+				void w.refreshAnnouncements(s.targetUser.trim());
+			} else {
+				s.groupAnnouncements = [];
+			}
 		}
 		void w.reloadActiveHistory();
 	}

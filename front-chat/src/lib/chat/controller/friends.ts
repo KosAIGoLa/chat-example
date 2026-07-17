@@ -19,6 +19,8 @@ export interface FriendsDeps {
 	setTargetUser: (v: string) => void;
 	setMessages: (m: never[] | unknown) => void;
 	setLoadedKey: (k: string) => void;
+	/** Clear active pins when private conv ends. */
+	setGroupAnnouncements?: (a: []) => void;
 	getLastPreviews: () => Record<string, { text: string; ts: number }>;
 	setLastPreviews: (p: Record<string, { text: string; ts: number }>) => void;
 	getUnreadPeers: () => Record<string, boolean>;
@@ -82,6 +84,7 @@ export function createFriendsApi(deps: FriendsDeps) {
 			deps.setMessages([]);
 			deps.setTargetUser('');
 			deps.setLoadedKey('');
+			deps.setGroupAnnouncements?.([]);
 		}
 	}
 
@@ -109,6 +112,7 @@ export function createFriendsApi(deps: FriendsDeps) {
 		if (deps.getChatMode() === 'private' && deps.getTargetUser() === uid) {
 			deps.setMessages([]);
 			deps.setTargetUser('');
+			deps.setGroupAnnouncements?.([]);
 		} else if (deps.getChatMode() === 'group') {
 			deps.filterGroupMessagesFromUser?.(uid);
 		}

@@ -1,14 +1,15 @@
 <script lang="ts">
 	import type { GroupAnnouncement } from '../types';
 	import { Button } from '$lib/components/ui/button';
-	import Megaphone from '@lucide/svelte/icons/megaphone';
+	import Pin from '@lucide/svelte/icons/pin';
 	import ChevronDown from '@lucide/svelte/icons/chevron-down';
 	import ChevronUp from '@lucide/svelte/icons/chevron-up';
 	import X from '@lucide/svelte/icons/x';
 
 	interface Props {
+		/** Pinned messages (multiple allowed). */
 		announcements: GroupAnnouncement[];
-		/** Owner/admin may remove. */
+		/** Owner/admin may unpin. */
 		canManage?: boolean;
 		onRemove?: (messageId: string) => void;
 		onOpenMessage?: (messageId: string) => void;
@@ -31,13 +32,13 @@
 	<div
 		class="border-amber-500/30 bg-amber-500/10 shrink-0 border-b px-3 py-2 md:px-4"
 		role="region"
-		aria-label="群公告"
+		aria-label="置顶消息"
 	>
 		<div class="flex items-start gap-2">
 			<div
 				class="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-amber-700 dark:text-amber-300"
 			>
-				<Megaphone class="size-3.5" />
+				<Pin class="size-3.5" />
 			</div>
 			<div class="min-w-0 flex-1">
 				<button
@@ -49,7 +50,7 @@
 					}}
 				>
 					<p class="text-[11px] font-semibold tracking-wide text-amber-800 uppercase dark:text-amber-200">
-						群公告
+						置顶
 						{#if count > 1}
 							· {count} 条
 						{/if}
@@ -61,8 +62,8 @@
 						{top.content}
 					</p>
 				</button>
-				{#if expanded}
-					<ul class="mt-2 max-h-40 space-y-1.5 overflow-y-auto pr-1">
+				{#if expanded && count > 1}
+					<ul class="mt-2 max-h-48 space-y-1.5 overflow-y-auto pr-1">
 						{#each announcements as a (a.message_id)}
 							<li
 								class="bg-background/60 flex items-start gap-2 rounded-lg border border-amber-500/20 px-2.5 py-1.5 text-sm"
@@ -82,7 +83,7 @@
 										variant="ghost"
 										size="icon-xs"
 										class="text-muted-foreground shrink-0"
-										title="取消公告"
+										title="取消置顶"
 										onclick={() => onRemove?.(a.message_id)}
 									>
 										<X class="size-3.5" />
@@ -99,7 +100,8 @@
 					size="icon-xs"
 					class="text-amber-800 shrink-0 dark:text-amber-200"
 					onclick={() => (expanded = !expanded)}
-					aria-label={expanded ? '收起公告' : '展开公告'}
+					aria-label={expanded ? '收起置顶' : '展开全部置顶'}
+					title={expanded ? '收起' : `展开全部 ${count} 条`}
 				>
 					{#if expanded}
 						<ChevronUp class="size-4" />
@@ -112,7 +114,7 @@
 					variant="ghost"
 					size="icon-xs"
 					class="text-muted-foreground shrink-0"
-					title="取消公告"
+					title="取消置顶"
 					onclick={() => onRemove?.(top.message_id)}
 				>
 					<X class="size-3.5" />

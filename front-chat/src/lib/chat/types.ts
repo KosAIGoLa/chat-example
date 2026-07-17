@@ -311,10 +311,13 @@ export interface GroupDissolvedEvent {
 	by_user_id?: string;
 }
 
-/** One pinned group announcement (message snapshot). */
+/** One pinned message snapshot (group or private). */
 export interface GroupAnnouncement {
 	id: number;
-	group_id: string;
+	/** Group pins only. */
+	group_id?: string;
+	/** Private pins only — conversation peer. */
+	peer_id?: string;
 	message_id: string;
 	content: string;
 	content_type?: string;
@@ -325,11 +328,21 @@ export interface GroupAnnouncement {
 	created_at?: number;
 }
 
-/** WS fan-out when announcements change. */
+/** WS fan-out when group pins change. */
 export interface GroupAnnouncementEvent {
 	type: 'group_announcement';
 	action: 'set' | 'remove' | 'set_bulk' | string;
 	group_id: string;
+	by_user_id?: string;
+	items?: GroupAnnouncement[];
+	message_id?: string;
+}
+
+/** WS fan-out when private pins change. */
+export interface PrivatePinEvent {
+	type: 'private_pin';
+	action: 'set' | 'remove' | 'set_bulk' | string;
+	peer_id: string;
 	by_user_id?: string;
 	items?: GroupAnnouncement[];
 	message_id?: string;

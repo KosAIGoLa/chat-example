@@ -20,7 +20,8 @@
 	import CircleAlert from '@lucide/svelte/icons/circle-alert';
 	import Reply from '@lucide/svelte/icons/reply';
 	import Pencil from '@lucide/svelte/icons/pencil';
-	import Megaphone from '@lucide/svelte/icons/megaphone';
+	import Pin from '@lucide/svelte/icons/pin';
+	import PinOff from '@lucide/svelte/icons/pin-off';
 	import CheckSquare from '@lucide/svelte/icons/check-square';
 	import Square from '@lucide/svelte/icons/square';
 	import ListChecks from '@lucide/svelte/icons/list-checks';
@@ -36,9 +37,9 @@
 		avatarSrc?: string;
 		/** Allow reply via context menu (group chat). */
 		canReply?: boolean;
-		/** Group owner/admin: pin as announcement. */
+		/** Group owner/admin: pin message (multiple allowed). */
 		canAnnounce?: boolean;
-		/** Message is already a group announcement. */
+		/** Message is already pinned. */
 		isAnnouncement?: boolean;
 		/** Multi-select mode for bulk pin. */
 		selectMode?: boolean;
@@ -50,9 +51,9 @@
 		onReply?: (msg: ChatMessage) => void;
 		/** Edit own text message. */
 		onEdit?: (msg: ChatMessage, newText: string) => Promise<void> | void;
-		/** Set this message as announcement. */
+		/** Pin this message (adds; does not replace other pins). */
 		onSetAnnouncement?: (msg: ChatMessage) => void;
-		/** Remove this message from announcements. */
+		/** Unpin this message. */
 		onUnsetAnnouncement?: (msg: ChatMessage) => void;
 		/** Enter multi-select with this message. */
 		onEnterSelect?: (msg: ChatMessage) => void;
@@ -143,7 +144,7 @@
 	const showAnnounce = $derived(
 		canAnnounce &&
 			!!message.id &&
-			message.type === 'group' &&
+			(message.type === 'group' || message.type === 'private') &&
 			!system &&
 			!recalled &&
 			message.send_status !== 'failed' &&
@@ -172,7 +173,7 @@
 		// Keep menu inside viewport
 		const pad = 8;
 		const w = 180;
-		const h = 160;
+		const h = 220;
 		if (typeof window !== 'undefined') {
 			if (menuX + w > window.innerWidth - pad) menuX = window.innerWidth - w - pad;
 			if (menuY + h > window.innerHeight - pad) menuY = window.innerHeight - h - pad;
@@ -342,8 +343,8 @@
 					<span
 						class="inline-flex items-center gap-0.5 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
 					>
-						<Megaphone class="size-2.5" />
-						公告
+						<Pin class="size-2.5" />
+						置顶
 					</span>
 				{/if}
 			</div>
@@ -556,8 +557,8 @@
 						onUnsetAnnouncement?.(message);
 					}}
 				>
-					<Megaphone class="size-3.5 opacity-70" />
-					取消公告
+					<PinOff class="size-3.5 opacity-70" />
+					取消置顶
 				</button>
 			{:else}
 				<button
@@ -569,8 +570,8 @@
 						onSetAnnouncement?.(message);
 					}}
 				>
-					<Megaphone class="size-3.5 opacity-70" />
-					设为公告
+					<Pin class="size-3.5 opacity-70" />
+					置顶
 				</button>
 			{/if}
 			<button
@@ -583,7 +584,7 @@
 				}}
 			>
 				<ListChecks class="size-3.5 opacity-70" />
-				多选设公告
+				多选置顶
 			</button>
 		{/if}
 		{#if showEdit}

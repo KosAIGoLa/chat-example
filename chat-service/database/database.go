@@ -33,6 +33,7 @@ func Init() *gorm.DB {
 		&model.Friendship{},
 		&model.Blacklist{},
 		&model.PrivateConvCutoff{},
+		&model.PrivatePin{},
 		&model.Group{},
 		&model.GroupMember{},
 		&model.GroupAnnouncement{},

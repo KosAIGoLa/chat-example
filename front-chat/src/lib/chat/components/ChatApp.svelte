@@ -702,22 +702,30 @@
 				</div>
 			</div>
 
-			{#if chat.chatMode === 'group' && groupId.trim() && chat.groupAnnouncements.length > 0}
+			{#if ((chat.chatMode === 'group' && groupId.trim()) ||
+					(chat.chatMode === 'private' && targetUser.trim())) &&
+				chat.groupAnnouncements.length > 0}
 				<GroupAnnouncementsBar
 					announcements={chat.groupAnnouncements}
-					canManage={!!activeGroup?.canManage}
+					canManage={
+						chat.chatMode === 'private'
+							? true
+							: !!activeGroup?.canManage
+					}
 					onRemove={(mid) => {
 						void chat.removeAnnouncement(mid).then(() => {
-							toastInfo('已取消公告', '群公告');
+							toastInfo('已取消置顶', '置顶');
 						}).catch((err) => toastError((err as Error).message || '取消失败'));
 					}}
 					onOpenMessage={() => {
-						/* list stays in view; multi announcements expand in bar */
+						/* list stays in view; multi pins expand in bar */
 					}}
 				/>
 			{/if}
 
-			{#if chat.selectMode && chat.chatMode === 'group'}
+			{#if chat.selectMode &&
+				((chat.chatMode === 'group' && groupId.trim()) ||
+					(chat.chatMode === 'private' && targetUser.trim()))}
 				<div
 					class="bg-primary/10 flex shrink-0 items-center gap-2 border-b px-3 py-2 md:px-4"
 				>
@@ -742,12 +750,12 @@
 								void chat
 									.setMessagesAsAnnouncement()
 									.then((n) => {
-										toastInfo(`已将 ${n.length} 条消息设为公告`, '群公告');
+										toastInfo(`已置顶 ${n.length} 条消息`, '置顶');
 									})
-									.catch((err) => toastError((err as Error).message || '设置失败'));
+									.catch((err) => toastError((err as Error).message || '置顶失败'));
 							}}
 						>
-							设为公告
+							置顶
 						</Button>
 					</div>
 				</div>
@@ -810,7 +818,10 @@
 					(chat.chatMode === 'group' && !!groupId.trim()) ||
 					(chat.chatMode === 'private' && !!targetUser.trim())
 				}
-				canAnnounce={chat.chatMode === 'group' && !!activeGroup?.canManage}
+				canAnnounce={
+					(chat.chatMode === 'group' && !!activeGroup?.canManage) ||
+					(chat.chatMode === 'private' && !!targetUser.trim())
+				}
 				selectMode={chat.selectMode}
 				selectedMsgIds={chat.selectedMsgIds}
 				isAnnouncement={(id) => chat.isAnnouncement(id)}
@@ -865,16 +876,17 @@
 				}}
 				onSetAnnouncement={(msg) => {
 					if (!msg.id) return;
+					// Append pin — existing pins stay (multiple allowed).
 					void chat
 						.setMessagesAsAnnouncement([msg.id])
-						.then(() => toastInfo('已设为群公告', '群公告'))
-						.catch((err) => toastError((err as Error).message || '设置失败'));
+						.then(() => toastInfo('已置顶（可多条）', '置顶'))
+						.catch((err) => toastError((err as Error).message || '置顶失败'));
 				}}
 				onUnsetAnnouncement={(msg) => {
 					if (!msg.id) return;
 					void chat
 						.removeAnnouncement(msg.id)
-						.then(() => toastInfo('已取消公告', '群公告'))
+						.then(() => toastInfo('已取消置顶', '置顶'))
 						.catch((err) => toastError((err as Error).message || '取消失败'));
 				}}
 				onEnterSelect={(msg) => {

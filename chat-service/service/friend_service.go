@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -350,6 +351,8 @@ func (s *FriendService) ClearPrivateConversation(a, b uint) {
 	}).Create(&row).Error
 
 	aStr, bStr := uidStr(a), uidStr(b)
+	// Drop shared pins with the history wipe.
+	_ = s.db.Where("user_a_id = ? AND user_b_id = ?", ua, ub).Delete(&model.PrivatePin{}).Error
 	if s.offline != nil {
 		s.offline.ClearBetween(aStr, bStr)
 	}
@@ -516,4 +519,196 @@ func (s *FriendService) PushFriendEvent(userID string, ev dto.FriendEvent) {
 		return
 	}
 	s.hub.DeliverToUser(userID, data)
+}
+
+// ListPrivatePins returns all pins for the private conversation with peer (newest first).
+// Either friend may list; blocked pairs still may list existing pins (messaging is blocked separately).
+func (s *FriendService) ListPrivatePins(me uint, peerIDStr string) ([]dto.PrivatePinDTO, error) {
+	peer, err := parseUID(peerIDStr)
+	if err != nil {
+		return nil, err
+	}
+	if me == peer {
+		return nil, errors.New("invalid peer")
+	}
+	if !s.AreFriends(me, peer) {
+		return nil, errors.New("not friends")
+	}
+	ua, ub := orderedPair(me, peer)
+	var rows []model.PrivatePin
+	if err := s.db.Where("user_a_id = ? AND user_b_id = ?", ua, ub).
+		Order("created_at desc").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]dto.PrivatePinDTO, 0, len(rows))
+	peerStr := uidStr(peer)
+	for _, r := range rows {
+		out = append(out, toPrivatePinDTO(r, peerStr))
+	}
+	return out, nil
+}
+
+// AddPrivatePins pins one or more private messages (either friend). Duplicate message_ids upsert.
+func (s *FriendService) AddPrivatePins(me uint, peerIDStr string, items []dto.AddPrivatePinItem) ([]dto.PrivatePinDTO, error) {
+	peer, err := parseUID(peerIDStr)
+	if err != nil {
+		return nil, err
+	}
+	if me == peer {
+		return nil, errors.New("invalid peer")
+	}
+	if !s.AreFriends(me, peer) {
+		return nil, errors.New("not friends")
+	}
+	if s.IsBlocked(me, peer) {
+		return nil, errors.New("blocked")
+	}
+	if len(items) == 0 {
+		return nil, errors.New("no messages to pin")
+	}
+	if len(items) > 50 {
+		return nil, errors.New("too many pins at once (max 50)")
+	}
+	ua, ub := orderedPair(me, peer)
+	setBy := uidStr(me)
+	peerStr := uidStr(peer)
+	out := make([]dto.PrivatePinDTO, 0, len(items))
+	for _, it := range items {
+		mid := strings.TrimSpace(it.MessageID)
+		if mid == "" || len(mid) > 36 {
+			continue
+		}
+		content := strings.TrimSpace(it.Content)
+		if content == "" {
+			content = "[消息]"
+		}
+		if len(content) > 2000 {
+			content = content[:2000]
+		}
+		ct := strings.TrimSpace(it.ContentType)
+		if ct == "" {
+			ct = "text"
+		}
+		row := model.PrivatePin{
+			UserAID:      ua,
+			UserBID:      ub,
+			MessageID:    mid,
+			Content:      content,
+			ContentType:  ct,
+			FromUserID:   strings.TrimSpace(it.FromUserID),
+			FromUsername: strings.TrimSpace(it.FromUsername),
+			SetByUserID:  setBy,
+			MessageTS:    it.MessageTS,
+		}
+		var existing model.PrivatePin
+		err := s.db.Where("user_a_id = ? AND user_b_id = ? AND message_id = ?", ua, ub, mid).First(&existing).Error
+		if err == nil {
+			_ = s.db.Model(&existing).Updates(map[string]interface{}{
+				"content":        row.Content,
+				"content_type":   row.ContentType,
+				"from_user_id":   row.FromUserID,
+				"from_username":  row.FromUsername,
+				"set_by_user_id": setBy,
+				"message_ts":     row.MessageTS,
+			}).Error
+			existing.Content = row.Content
+			existing.ContentType = row.ContentType
+			existing.FromUserID = row.FromUserID
+			existing.FromUsername = row.FromUsername
+			existing.SetByUserID = setBy
+			existing.MessageTS = row.MessageTS
+			out = append(out, toPrivatePinDTO(existing, peerStr))
+			continue
+		}
+		if err := s.db.Create(&row).Error; err != nil {
+			continue
+		}
+		out = append(out, toPrivatePinDTO(row, peerStr))
+	}
+	if len(out) == 0 {
+		return nil, errors.New("failed to pin any message")
+	}
+	return out, nil
+}
+
+// RemovePrivatePin unpins one message (either friend).
+func (s *FriendService) RemovePrivatePin(me uint, peerIDStr, messageID string) error {
+	peer, err := parseUID(peerIDStr)
+	if err != nil {
+		return err
+	}
+	if me == peer {
+		return errors.New("invalid peer")
+	}
+	if !s.AreFriends(me, peer) {
+		return errors.New("not friends")
+	}
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return errors.New("message_id required")
+	}
+	ua, ub := orderedPair(me, peer)
+	res := s.db.Where("user_a_id = ? AND user_b_id = ? AND message_id = ?", ua, ub, messageID).
+		Delete(&model.PrivatePin{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return errors.New("pin not found")
+	}
+	return nil
+}
+
+// NotifyPrivatePin pushes private_pin WS events to both peers (peer_id relative to each recipient).
+func (s *FriendService) NotifyPrivatePin(me uint, peerIDStr, action string, items []dto.PrivatePinDTO, messageID string) {
+	if s.hub == nil {
+		return
+	}
+	peer, err := parseUID(peerIDStr)
+	if err != nil {
+		return
+	}
+	meStr := uidStr(me)
+	peerStr := uidStr(peer)
+	// Deliver to me: peer is peer
+	s.pushPrivatePinEvent(meStr, peerStr, meStr, action, items, messageID)
+	// Deliver to peer: peer is me
+	s.pushPrivatePinEvent(peerStr, meStr, meStr, action, items, messageID)
+}
+
+func (s *FriendService) pushPrivatePinEvent(toUserID, peerID, byUserID, action string, items []dto.PrivatePinDTO, messageID string) {
+	// Clone items with peer_id set for this recipient.
+	cloned := make([]dto.PrivatePinDTO, len(items))
+	for i, it := range items {
+		it.PeerID = peerID
+		cloned[i] = it
+	}
+	ev := dto.PrivatePinEvent{
+		Type:      "private_pin",
+		Action:    action,
+		PeerID:    peerID,
+		ByUserID:  byUserID,
+		Items:     cloned,
+		MessageID: messageID,
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	s.hub.DeliverToUser(toUserID, data)
+}
+
+func toPrivatePinDTO(r model.PrivatePin, peerID string) dto.PrivatePinDTO {
+	return dto.PrivatePinDTO{
+		ID:           r.ID,
+		PeerID:       peerID,
+		MessageID:    r.MessageID,
+		Content:      r.Content,
+		ContentType:  r.ContentType,
+		FromUserID:   r.FromUserID,
+		FromUsername: r.FromUsername,
+		SetByUserID:  r.SetByUserID,
+		MessageTS:    r.MessageTS,
+		CreatedAt:    r.CreatedAt.Unix(),
+	}
 }

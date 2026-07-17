@@ -228,6 +228,9 @@ export function wireChatController(ctx: {
 		setLoadedKey: (k) => {
 			s.loadedKey = k;
 		},
+		setGroupAnnouncements: (a) => {
+			s.groupAnnouncements = a;
+		},
 		getLastPreviews: () => s.lastPreviews,
 		setLastPreviews: (p) => {
 			s.lastPreviews = p;
@@ -312,6 +315,7 @@ export function wireChatController(ctx: {
 		setGroupId: (v) => {
 			s.groupId = v;
 		},
+		getTargetUser: () => s.targetUser,
 		getJoinedGroups: () => s.joinedGroups,
 		setJoinedGroups: (g) => {
 			s.joinedGroups = g;

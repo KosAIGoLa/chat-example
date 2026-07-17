@@ -79,6 +79,11 @@ func SetupRouter(
 		api.POST("/friends/blacklist", friendCtrl.BlockUser)
 		api.DELETE("/friends/blacklist/:user_id", friendCtrl.UnblockUser)
 
+		// Private chat pins (multiple; either friend can pin/unpin)
+		api.GET("/private/:peer_id/pins", friendCtrl.ListPrivatePins)
+		api.POST("/private/:peer_id/pins", friendCtrl.AddPrivatePins)
+		api.DELETE("/private/:peer_id/pins/:message_id", friendCtrl.RemovePrivatePin)
+
 		// Voice messages
 		api.POST("/voice", mediaCtrl.UploadVoice)
 

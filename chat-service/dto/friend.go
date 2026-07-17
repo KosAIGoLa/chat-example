@@ -50,3 +50,50 @@ type BlockUserRequest struct {
 	Username string `json:"username,omitempty"`
 	UserID   string `json:"user_id,omitempty"`
 }
+
+// PrivatePinDTO is one pinned private-chat message (shared by both peers).
+type PrivatePinDTO struct {
+	ID           uint   `json:"id"`
+	PeerID       string `json:"peer_id,omitempty"` // conversation peer (from caller's view)
+	MessageID    string `json:"message_id"`
+	Content      string `json:"content"`
+	ContentType  string `json:"content_type,omitempty"`
+	FromUserID   string `json:"from_user_id,omitempty"`
+	FromUsername string `json:"from_username,omitempty"`
+	SetByUserID  string `json:"set_by_user_id,omitempty"`
+	MessageTS    int64  `json:"message_ts,omitempty"`
+	CreatedAt    int64  `json:"created_at,omitempty"`
+}
+
+// AddPrivatePinRequest is POST /api/private/:peer_id/pins body (single or bulk).
+type AddPrivatePinRequest struct {
+	MessageID    string              `json:"message_id,omitempty"`
+	Content      string              `json:"content,omitempty"`
+	ContentType  string              `json:"content_type,omitempty"`
+	FromUserID   string              `json:"from_user_id,omitempty"`
+	FromUsername string              `json:"from_username,omitempty"`
+	MessageTS    int64               `json:"message_ts,omitempty"`
+	MessageIDs   []string            `json:"message_ids,omitempty"`
+	Items        []AddPrivatePinItem `json:"items,omitempty"`
+}
+
+// AddPrivatePinItem is one message to pin in a bulk request.
+type AddPrivatePinItem struct {
+	MessageID    string `json:"message_id"`
+	Content      string `json:"content,omitempty"`
+	ContentType  string `json:"content_type,omitempty"`
+	FromUserID   string `json:"from_user_id,omitempty"`
+	FromUsername string `json:"from_username,omitempty"`
+	MessageTS    int64  `json:"message_ts,omitempty"`
+}
+
+// PrivatePinEvent is WS fan-out when private pins change.
+// type: "private_pin"
+type PrivatePinEvent struct {
+	Type      string          `json:"type"`    // "private_pin"
+	Action    string          `json:"action"`  // "set" | "remove" | "set_bulk"
+	PeerID    string          `json:"peer_id"` // the other party from recipient's view
+	ByUserID  string          `json:"by_user_id,omitempty"`
+	Items     []PrivatePinDTO `json:"items,omitempty"`
+	MessageID string          `json:"message_id,omitempty"` // remove
+}

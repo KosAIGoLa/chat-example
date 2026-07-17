@@ -46,3 +46,21 @@ type PrivateConvCutoff struct {
 	UserBID uint  `gorm:"primaryKey;not null" json:"user_b_id"`
 	CutAt   int64 `gorm:"not null" json:"cut_at"` // unix seconds
 }
+
+// PrivatePin pins one private chat message for the pair (multiple allowed).
+// UserAID < UserBID always (same ordering as Friendship).
+// Cleared when friendship ends / private history is wiped.
+type PrivatePin struct {
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	UserAID   uint   `gorm:"index;not null;uniqueIndex:idx_private_pin_msg" json:"user_a_id"`
+	UserBID   uint   `gorm:"index;not null;uniqueIndex:idx_private_pin_msg" json:"user_b_id"`
+	MessageID string `gorm:"size:36;not null;uniqueIndex:idx_private_pin_msg" json:"message_id"`
+	// Snapshot for display if original is gone / recalled.
+	Content      string    `gorm:"type:text" json:"content"`
+	ContentType  string    `gorm:"size:32" json:"content_type,omitempty"`
+	FromUserID   string    `gorm:"size:32" json:"from_user_id,omitempty"`
+	FromUsername string    `gorm:"size:100" json:"from_username,omitempty"`
+	SetByUserID  string    `gorm:"size:32" json:"set_by_user_id,omitempty"`
+	MessageTS    int64     `gorm:"index" json:"message_ts,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}

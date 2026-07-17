@@ -10,6 +10,7 @@ import type {
 	FriendEvent,
 	GroupAnnouncement,
 	GroupAnnouncementEvent,
+	PrivatePinEvent,
 	GroupDissolvedEvent,
 	GroupInfo,
 	GroupMember,
@@ -57,7 +58,7 @@ export interface WsDispatchDeps {
 	refreshFriends: () => void | Promise<void>;
 	refreshBlacklist: () => void | Promise<void>;
 	refreshOnlineUsers: () => void | Promise<void>;
-	refreshAnnouncements: (g?: string) => void | Promise<void>;
+	refreshAnnouncements: (scopeId?: string) => void | Promise<void>;
 	refreshBalance: () => void | Promise<void>;
 	onCallEvent?: (ev: CallEvent) => void;
 	onMeetingEvent?: (ev: MeetingEvent) => void;
@@ -114,6 +115,7 @@ export function createWsDispatcher(deps: WsDispatchDeps) {
 						deps.setMessages([]);
 						deps.setTargetUser('');
 						deps.setLoadedKey('');
+						deps.setGroupAnnouncements([]);
 					}
 				}
 			} else if (fe.action === 'blocked') {
@@ -157,6 +159,20 @@ export function createWsDispatcher(deps: WsDispatchDeps) {
 					);
 				} else {
 					void deps.refreshAnnouncements(gid);
+				}
+			}
+			return;
+		}
+		if (msg.type === 'private_pin' && 'peer_id' in msg) {
+			const pe = msg as unknown as PrivatePinEvent;
+			const peer = String(pe.peer_id ?? '');
+			if (peer && deps.getChatMode() === 'private' && deps.getTargetUser() === peer) {
+				if (pe.action === 'remove' && pe.message_id) {
+					deps.setGroupAnnouncements(
+						deps.getGroupAnnouncements().filter((a) => a.message_id !== pe.message_id)
+					);
+				} else {
+					void deps.refreshAnnouncements(peer);
 				}
 			}
 			return;

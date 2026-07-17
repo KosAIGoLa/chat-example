@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -270,4 +271,101 @@ func (ctrl *FriendController) UnblockUser(c *gin.Context) {
 	}
 	ctrl.friends.PushFriendEvent(meStr, ev)
 	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "user unblocked"})
+}
+
+// ListPrivatePins GET /api/private/:peer_id/pins
+func (ctrl *FriendController) ListPrivatePins(c *gin.Context) {
+	peerID, err := validate.UserIDStr(c.Param("peer_id"), true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+	list, err := ctrl.friends.ListPrivatePins(ctrl.me(c), peerID)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not friends") {
+			code = http.StatusForbidden
+		}
+		c.JSON(code, dto.APIResponseDTO{Code: code, Message: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, dto.APIResponseDTO{
+		Code: 200, Message: "success",
+		Data: gin.H{"pins": list, "count": len(list)},
+	})
+}
+
+// AddPrivatePins POST /api/private/:peer_id/pins
+// Body: single {message_id, content, ...} or bulk {items:[{message_id,...}]} / {message_ids:[]}
+func (ctrl *FriendController) AddPrivatePins(c *gin.Context) {
+	peerID, err := validate.UserIDStr(c.Param("peer_id"), true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+	var body dto.AddPrivatePinRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: validate.JSONBody(err).Error()})
+		return
+	}
+	items := body.Items
+	if len(items) == 0 && len(body.MessageIDs) > 0 {
+		for _, id := range body.MessageIDs {
+			items = append(items, dto.AddPrivatePinItem{MessageID: id})
+		}
+	}
+	if len(items) == 0 && strings.TrimSpace(body.MessageID) != "" {
+		items = append(items, dto.AddPrivatePinItem{
+			MessageID:    body.MessageID,
+			Content:      body.Content,
+			ContentType:  body.ContentType,
+			FromUserID:   body.FromUserID,
+			FromUsername: body.FromUsername,
+			MessageTS:    body.MessageTS,
+		})
+	}
+	me := ctrl.me(c)
+	list, err := ctrl.friends.AddPrivatePins(me, peerID, items)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not friends") || strings.Contains(err.Error(), "blocked") {
+			code = http.StatusForbidden
+		}
+		c.JSON(code, dto.APIResponseDTO{Code: code, Message: err.Error()})
+		return
+	}
+	action := "set"
+	if len(list) > 1 {
+		action = "set_bulk"
+	}
+	ctrl.friends.NotifyPrivatePin(me, peerID, action, list, "")
+	c.JSON(http.StatusOK, dto.APIResponseDTO{
+		Code: 200, Message: "pin set",
+		Data: gin.H{"pins": list, "count": len(list)},
+	})
+}
+
+// RemovePrivatePin DELETE /api/private/:peer_id/pins/:message_id
+func (ctrl *FriendController) RemovePrivatePin(c *gin.Context) {
+	peerID, err := validate.UserIDStr(c.Param("peer_id"), true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: err.Error()})
+		return
+	}
+	messageID := strings.TrimSpace(c.Param("message_id"))
+	if messageID == "" {
+		c.JSON(http.StatusBadRequest, dto.APIResponseDTO{Code: 400, Message: "message_id required"})
+		return
+	}
+	me := ctrl.me(c)
+	if err := ctrl.friends.RemovePrivatePin(me, peerID, messageID); err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not friends") {
+			code = http.StatusForbidden
+		}
+		c.JSON(code, dto.APIResponseDTO{Code: code, Message: err.Error()})
+		return
+	}
+	ctrl.friends.NotifyPrivatePin(me, peerID, "remove", nil, messageID)
+	c.JSON(http.StatusOK, dto.APIResponseDTO{Code: 200, Message: "pin removed"})
 }
