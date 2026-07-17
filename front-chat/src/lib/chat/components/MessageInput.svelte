@@ -259,7 +259,7 @@
 			<span class="truncate font-medium">{typingHint}</span>
 		</div>
 	{/if}
-	{#if chatMode === 'group' && replyTarget && replyName}
+	{#if replyTarget && replyName && (chatMode === 'group' || chatMode === 'private')}
 		<div
 			class="border-primary/25 bg-primary/5 mb-2 flex items-start gap-2 rounded-xl border px-3 py-2"
 		>
@@ -273,7 +273,9 @@
 						{replyTarget.preview}
 					</p>
 				{:else}
-					<p class="text-muted-foreground mt-0.5 text-[11px]">对该成员发送群消息</p>
+					<p class="text-muted-foreground mt-0.5 text-[11px]">
+						{chatMode === 'group' ? '对该成员发送群消息' : '回复该条私聊消息'}
+					</p>
 				{/if}
 			</div>
 			<Button
@@ -346,7 +348,7 @@
 				{/if}
 				<Input
 					bind:value
-					placeholder={chatMode === 'group' && replyName
+					placeholder={replyName && (chatMode === 'group' || chatMode === 'private')
 						? `回复 @${replyName}…`
 						: '输入消息…'}
 					class="h-11"

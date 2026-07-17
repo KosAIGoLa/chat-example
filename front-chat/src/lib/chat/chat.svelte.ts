@@ -1848,7 +1848,7 @@ export function createChatController(opts: {
 			replyTarget = null;
 			return;
 		}
-		// Only meaningful in group chats (and never reply to self as sole action).
+		// Private + group: quote reply to a message / peer.
 		replyTarget = {
 			user_id: String(target.user_id),
 			username: (target.username || target.user_id).trim() || target.user_id,
@@ -1874,7 +1874,7 @@ export function createChatController(opts: {
 		const id = newMsgId();
 		const ts = Math.floor(Date.now() / 1000);
 		const reply =
-			chatMode === 'group' && replyTarget?.user_id
+			replyTarget?.user_id && (chatMode === 'group' || chatMode === 'private')
 				? {
 						reply_to_user_id: replyTarget.user_id,
 						reply_to_username: replyTarget.username || replyTarget.user_id,
@@ -2153,7 +2153,7 @@ export function createChatController(opts: {
 		const plainLabel = '🎤 语音消息';
 		const id = newMsgId();
 		const reply =
-			chatMode === 'group' && replyTarget?.user_id
+			replyTarget?.user_id && (chatMode === 'group' || chatMode === 'private')
 				? {
 						reply_to_user_id: replyTarget.user_id,
 						reply_to_username: replyTarget.username || replyTarget.user_id,

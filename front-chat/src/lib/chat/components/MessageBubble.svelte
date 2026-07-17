@@ -63,12 +63,13 @@
 		canRecallMessage(message, myUserId) && !!onRecall
 	);
 	const showEdit = $derived(canEditMessage(message, myUserId) && !!onEdit);
+	// Group or private: right-click reply (quote). Recall is own-only via canRecallMessage.
 	const showReply = $derived(
 		canReply &&
 			!!onReply &&
 			!system &&
 			!recalled &&
-			message.type === 'group' &&
+			(message.type === 'group' || message.type === 'private') &&
 			message.send_status !== 'failed'
 	);
 	const sending = $derived(message.send_status === 'sending' || message.send_status === 'pending');
@@ -234,7 +235,7 @@
 {:else}
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div
-		class={cn('group flex w-full items-end gap-2.5', own ? 'flex-row-reverse' : 'flex-row')}
+		class={cn('group flex w-full items-end gap-1.5', own ? 'flex-row-reverse' : 'flex-row')}
 		oncontextmenu={openMenu}
 	>
 		<div class="mb-0.5 shrink-0">
@@ -350,18 +351,29 @@
 						<p class="text-muted-foreground text-[10px]">Ctrl/⌘+Enter 保存 · Esc 取消 · 2 分钟内可编辑</p>
 					</div>
 				{:else}
+					<!-- Bubble + tail pointing toward avatar -->
 					<div
 						class={cn(
-							'rounded-2xl px-3.5 py-2 text-sm leading-relaxed shadow-xs select-text',
+							'relative px-3.5 py-2 text-sm leading-relaxed shadow-xs select-text',
 							own
-								? 'bg-primary text-primary-foreground rounded-br-md'
-								: 'bg-muted text-foreground rounded-bl-md',
+								? 'bg-primary text-primary-foreground rounded-2xl rounded-br-sm'
+								: 'bg-muted text-foreground rounded-2xl rounded-bl-sm',
 							voice && 'min-w-[12rem] py-2.5',
 							failed && 'ring-destructive/50 opacity-80 ring-1',
 							sending && 'opacity-80'
 						)}
 						title="右键打开菜单"
 					>
+						<!-- Tail toward avatar (bottom corner, WeChat-style) -->
+						<span
+							class={cn(
+								'pointer-events-none absolute bottom-2.5 size-0',
+								own
+									? '-right-[7px] border-y-[6px] border-y-transparent border-l-[8px] border-l-primary'
+									: '-left-[7px] border-y-[6px] border-y-transparent border-r-[8px] border-r-muted'
+							)}
+							aria-hidden="true"
+						></span>
 						{#if hasReplyMeta}
 							<div
 								class={cn(
@@ -405,7 +417,7 @@
 								{/if}
 							</div>
 						{:else}
-							{message.content}
+							<span class="whitespace-pre-wrap break-words">{message.content}</span>
 						{/if}
 					</div>
 				{/if}

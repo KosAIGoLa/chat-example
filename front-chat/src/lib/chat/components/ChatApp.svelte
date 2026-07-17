@@ -754,7 +754,10 @@
 				loading={chat.historyLoading}
 				loadingOlder={chat.historyLoadingOlder}
 				hasMore={chat.historyHasMore}
-				canReply={chat.chatMode === 'group' && !!groupId.trim()}
+				canReply={
+					(chat.chatMode === 'group' && !!groupId.trim()) ||
+					(chat.chatMode === 'private' && !!targetUser.trim())
+				}
 				resolveName={(uid) =>
 					uid === chat.myUserId ? displayUsername || uid : chat.displayName(uid)
 				}
@@ -770,15 +773,24 @@
 					// Peer: probe /api/avatar/:id — UserAvatar shows letters if 404.
 					return `/api/avatar/${encodeURIComponent(uid)}`;
 				}}
-				onRecall={(msg) => void chat.recallMessage(msg)}
+				onRecall={(msg) => {
+					// Only own messages (controller + server also enforce).
+					if (msg.from !== userId) {
+						toastError('只能撤回自己的消息');
+						return;
+					}
+					void chat.recallMessage(msg);
+				}}
 				onResend={(msg) => void chat.resendMessage(msg)}
 				onBalanceChange={() => {
 					void chat.refreshBalance();
 				}}
 				onReply={(msg: ChatMessage) => {
-					if (chat.chatMode !== 'group' || !groupId.trim()) return;
+					const inGroup = chat.chatMode === 'group' && !!groupId.trim();
+					const inPrivate = chat.chatMode === 'private' && !!targetUser.trim();
+					if (!inGroup && !inPrivate) return;
 					if (!msg.from) return;
-					// Can reply to anyone's message (including own, for quote).
+					// Quote-reply to this message (own or peer).
 					const name =
 						msg.from === userId
 							? displayUsername || msg.from
